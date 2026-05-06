@@ -1,0 +1,25 @@
+llm:
+  provider: openai_compatible
+  model: deepseek-chat
+  api_key: "your api key here"
+  base_url: https://api.deepseek.com
+  temperature: 0.2
+  timeout_s: 60
+
+embeddings:
+  provider: huggingface
+  model: BAAI/bge-small-zh-v1.5
+  cache_dir: models
+  local_files_only: true
+
+vectorstore:
+  persist_dir: data/chroma
+  collection_name: npc_memory
+
+memory:
+  short_term_turns: 10
+  k_world: 3
+  k_persona: 3
+  k_dialogue_daily: 4
+  k_dialogue_important: 6
+  min_store_chars: 6

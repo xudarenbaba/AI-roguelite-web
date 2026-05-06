@@ -1,0 +1,128 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Arial, sans-serif;
+  background: #0d0f16;
+  color: #e6eaf4;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  padding: 16px;
+  min-height: 100vh;
+}
+
+.game-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#gameCanvas {
+  width: 100%;
+  max-width: 960px;
+  border: 1px solid #334;
+  background: #1a1f2b;
+}
+
+.hud {
+  padding: 10px;
+  background: #141926;
+  border: 1px solid #2c3651;
+  border-radius: 8px;
+}
+
+.controls {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.stance {
+  border: 1px solid #3a4668;
+  background: #1f2640;
+  color: #d7def3;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.stance.active {
+  background: #3755b7;
+  border-color: #4d6dd9;
+}
+
+.tips {
+  margin: 8px 0 0;
+  color: #a4aec9;
+  font-size: 12px;
+}
+
+.chat-panel {
+  border: 1px solid #2c3651;
+  border-radius: 8px;
+  background: #141926;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 540px;
+}
+
+.chat-panel h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+.chat-log {
+  flex: 1;
+  border: 1px solid #2e3852;
+  border-radius: 8px;
+  padding: 8px;
+  overflow-y: auto;
+  background: #0f1421;
+}
+
+.msg {
+  margin-bottom: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  line-height: 1.35;
+  font-size: 14px;
+}
+
+.msg.player {
+  background: #2b3554;
+}
+
+.msg.npc {
+  background: #243526;
+}
+
+#chatForm {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+#chatInput {
+  flex: 1;
+  border: 1px solid #334;
+  border-radius: 6px;
+  background: #0f1421;
+  color: #e6eaf4;
+  padding: 8px;
+}
+
+#chatForm button {
+  border: 1px solid #4d6dd9;
+  background: #3755b7;
+  color: white;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
