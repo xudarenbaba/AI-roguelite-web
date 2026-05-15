@@ -10,6 +10,9 @@
 
 ---
 
+![模拟游戏界面-1](images/img1.png)
+![模拟游戏界面-2](images/img2.png)
+
 ## 项目目录介绍
 
 ```text
