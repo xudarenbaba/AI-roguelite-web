@@ -83,6 +83,20 @@ function appendMessage(role, text) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+const EMOTION_KAOMOJI = {
+  neutral:   "( ・_・)",
+  focused:   "(•̀ᴗ•́)و",
+  annoyed:   "(╯°□°）╯",
+  worried:   "(；ω；)",
+  happy:     "(＾▽＾)",
+  tense:     "(°ロ°!)",
+  sarcastic: "(¬‿¬)",
+};
+
+function emotionKaomoji(emotion) {
+  return EMOTION_KAOMOJI[emotion] || EMOTION_KAOMOJI.neutral;
+}
+
 function appendStreamingNpcMessage() {
   const el = document.createElement("div");
   el.className = "msg npc";
@@ -94,8 +108,9 @@ function appendStreamingNpcMessage() {
       el.textContent += delta;
       chatLog.scrollTop = chatLog.scrollHeight;
     },
-    finish(finalText) {
-      el.textContent = `烬：${finalText}`;
+    finish(finalText, emotion) {
+      const kaomoji = emotionKaomoji(emotion);
+      el.textContent = `烬 ${kaomoji}：${finalText}`;
       chatLog.scrollTop = chatLog.scrollHeight;
     },
   };
@@ -625,11 +640,12 @@ async function sendDialogue(message) {
         }
       } else if (evt.type === "done") {
         const finalText = evt.action?.dialogue || accumulated || "收到，我会继续和你协同。";
-        msgNode.finish(finalText);
-        setAllyBubble(finalText);
+        const emotion = evt.action?.emotion || "neutral";
+        msgNode.finish(finalText, emotion);
+        setAllyBubble(`${emotionKaomoji(emotion)} ${finalText}`);
       } else if (evt.type === "error") {
         const fallbackText = evt.fallback?.dialogue || "连接中断。我会继续执行上一条指令。";
-        msgNode.finish(fallbackText);
+        msgNode.finish(fallbackText, "neutral");
         setAllyBubble(fallbackText);
       }
     }

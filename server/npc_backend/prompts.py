@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import Any
+
+
 def _join_lines(lines: list[str]) -> str:
     if not lines:
         return "无"
@@ -31,7 +34,10 @@ def build_messages(
         "4) 严格基于记忆，不要编造长期事实。\n"
         "5) 注意保持与最近对话的一致性。\n"
         "6) 可以毒舌和贱嗖嗖，但不能恶意辱骂或人身攻击。\n"
-        "7) 不输出工具调用、不输出 JSON。"
+        "7) 不输出工具调用、不输出 JSON。\n"
+        "8) 在回复正文末尾另起一行，输出一个情绪标签，格式严格为 <emotion>单词</emotion>，"
+        "从以下词中选一个最符合当前语气的：neutral focused annoyed worried happy tense sarcastic。"
+        "不要解释标签，不要省略。"
     )
     user_prompt = (
         f"[场景]\n{scene_info}\n\n"

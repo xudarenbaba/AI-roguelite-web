@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
+import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from server.npc_backend.config import load_config
 from server.npc_backend.llm import chat_completion_stream, classify_dialogue_memory
+
+_EMOTION_RE = re.compile(r"<emotion>([\w]+)</emotion>\s*$", re.IGNORECASE)
+_VALID_EMOTIONS = {
+    "neutral", "focused", "annoyed", "worried", "happy", "tense", "sarcastic"
+}
 from server.npc_backend.memory import MemoryStore
 from server.npc_backend.prompts import build_messages
 from server.npc_backend.schemas import ChatAction
@@ -75,39 +82,55 @@ class NpcConversationEngine:
                 full_reply_parts.append(delta)
                 yield _event("delta", {"text": delta})
 
-            full_reply = "".join(full_reply_parts).strip() or "收到，我会继续和你协同。"
+            raw_reply = "".join(full_reply_parts).strip()
 
-            # 写短期记忆
-            self._short_term.add_turn(
-                player_id=player_id, npc_id=npc_id, role="user", content=message
-            )
-            self._short_term.add_turn(
-                player_id=player_id,
-                npc_id=npc_id,
-                role="assistant",
-                content=full_reply,
-            )
+            # 从回复末尾提取 <emotion>xxx</emotion> 标签
+            emotion = "neutral"
+            m = _EMOTION_RE.search(raw_reply)
+            if m:
+                candidate = m.group(1).lower()
+                emotion = candidate if candidate in _VALID_EMOTIONS else "neutral"
+                raw_reply = _EMOTION_RE.sub("", raw_reply).strip()
 
-            # 分级并写长期记忆
-            min_chars = int(self._cfg.get("memory", {}).get("min_store_chars", 6))
-            if len(full_reply) >= min_chars:
-                tier, text = classify_dialogue_memory(
-                    player_message=message,
-                    npc_reply=full_reply,
-                    scene_info=scene_info,
-                )
-                self._memory.add_dialogue_memory(
-                    player_id=player_id,
-                    npc_id=npc_id,
-                    dialogue_tier=tier,
-                    text=text,
-                    scene_info=scene_info,
-                )
+            full_reply = raw_reply or "收到，我会继续和你协同。"
 
             action = ChatAction(
-                action_type="dialogue", dialogue=full_reply, emotion="focused"
+                action_type="dialogue", dialogue=full_reply, emotion=emotion
             )
+            # 先发 done，让前端立刻固定文本和情绪
             yield _event("done", {"action": action.model_dump(exclude_none=True)})
+
+            # 后台异步写记忆，不阻塞流式响应
+            min_chars = int(self._cfg.get("memory", {}).get("min_store_chars", 6))
+
+            def _write_memory(
+                reply: str = full_reply,
+                msg: str = message,
+                pid: str = player_id,
+                nid: str = npc_id,
+                si: dict = scene_info,
+                mc: int = min_chars,
+            ) -> None:
+                self._short_term.add_turn(pid, nid, "user", msg)
+                self._short_term.add_turn(pid, nid, "assistant", reply)
+                if len(reply) >= mc:
+                    try:
+                        tier, text = classify_dialogue_memory(
+                            player_message=msg,
+                            npc_reply=reply,
+                            scene_info=si,
+                        )
+                        self._memory.add_dialogue_memory(
+                            player_id=pid,
+                            npc_id=nid,
+                            dialogue_tier=tier,
+                            text=text,
+                            scene_info=si,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            threading.Thread(target=_write_memory, daemon=True).start()
 
         except Exception as exc:  # noqa: BLE001
             fallback = ChatAction(
