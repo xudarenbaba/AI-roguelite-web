@@ -73,20 +73,6 @@ class MemoryStore:
             metadata={"description": "single npc memory"},
         )
 
-    def _query(self, query: str, where: dict[str, Any], limit: int) -> list[str]:
-        coll = self._collection()
-        try:
-            result = coll.query(
-                query_embeddings=[_embed_texts([query])[0]],
-                n_results=limit,
-                where=where,
-                include=["documents"],
-            )
-            documents = result.get("documents", [[]])[0] if result else []
-            return [doc for doc in documents if doc]
-        except Exception:
-            return []
-
     def _query_with_embedding(
         self, embedding: list[float], where: dict[str, Any], limit: int
     ) -> list[str]:
@@ -170,44 +156,6 @@ class MemoryStore:
             texts=persona_lines,
             extra_metadata={"scope": "npc"},
             replace_existing=False,
-        )
-
-    def search_world(self, query: str) -> list[str]:
-        return self._query(
-            query=query,
-            where={"memory_type": "world", "npc_id": "global"},
-            limit=self._k_world,
-        )
-
-    def search_persona(self, query: str, npc_id: str) -> list[str]:
-        return self._query(
-            query=query,
-            where={"memory_type": "persona", "npc_id": npc_id},
-            limit=self._k_persona,
-        )
-
-    def search_dialogue_daily(self, query: str, player_id: str, npc_id: str) -> list[str]:
-        return self._query(
-            query=query,
-            where={
-                "memory_type": "dialogue",
-                "dialogue_tier": "daily",
-                "player_id": player_id,
-                "npc_id": npc_id,
-            },
-            limit=self._k_daily,
-        )
-
-    def search_dialogue_important(self, query: str, player_id: str, npc_id: str) -> list[str]:
-        return self._query(
-            query=query,
-            where={
-                "memory_type": "dialogue",
-                "dialogue_tier": "important",
-                "player_id": player_id,
-                "npc_id": npc_id,
-            },
-            limit=self._k_important,
         )
 
     def add_dialogue_memory(
