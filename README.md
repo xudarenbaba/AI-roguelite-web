@@ -1,12 +1,13 @@
 # AI Roguelite Web Demo (MVP)
 
-这是一个可独立运行的网页 Demo，包含：
+这是一个前后端分离的网页 Demo，包含：
 
-- 浏览器端 2D 战斗玩法（移动、射击、敌人与 NPC 同伴协作）
+- 浏览器端 2D 战斗玩法（移动、射击、障碍物掩体、无限关卡）
 - 单 NPC 流式对话后端（`Flask streaming + ChromaDB`）
 - 通过自然语言控制 NPC 战术姿态（守护 / 突击 / 游击）
 - 记忆系统（短期记忆 + 长期记忆）
 - 长期记忆上下文并行检索（世界观设定 + 角色设定 + 对话历史）
+- NPC 情绪系统（7 种情绪 + 颜文字展示）
 
 ---
 
@@ -17,10 +18,15 @@
 
 ```text
 ai-roguelite-web
-├─ run.py                          # 启动入口（Flask）
+├─ run.py                          # 启动 NPC API 服务（端口 5100）
+├─ run_game.py                     # 启动游戏静态文件服务（端口 8080）
 ├─ requirements.txt                # Python 依赖
-├─ config.yaml                     # 当前生效配置（仅全局参数，不含 npc）
+├─ config.yaml                     # 当前生效配置
 ├─ config.example.yaml             # 配置模板
+├─ game                            # 游戏客户端（纯静态，独立于后端）
+│  ├─ index.html
+│  ├─ game.js                      # 游戏逻辑：无限关卡、障碍物、NPC 对话
+│  └─ styles.css
 ├─ lore
 │  ├─ world_setting.md             # 世界观设定文档（用于导入 Chroma）
 │  └─ persona_setting.md           # 角色设定文档（用于导入 Chroma）
@@ -28,11 +34,7 @@ ai-roguelite-web
 │  ├─ import_world_setting.py      # 导入世界观设定到 Chroma
 │  └─ import_persona_setting.py    # 导入角色设定到 Chroma（需传 --npc-id）
 └─ server
-   ├─ app.py                       # Web 路由（/api/chat/stream、/api/command）
-   ├─ templates/index.html         # 页面模板
-   ├─ static
-   │  ├─ game.js                   # 前端战斗逻辑、对话调用
-   │  └─ styles.css
+   ├─ app.py                       # NPC API 路由（/api/chat/stream、/api/command）
    └─ npc_backend
       ├─ config.py                 # 配置加载
       ├─ schemas.py                # 请求/响应结构（ChatRequest / CommandResponse）
@@ -40,17 +42,16 @@ ai-roguelite-web
       ├─ memory.py                 # 长期记忆（Chroma：world / persona / dialogue）
       ├─ prompts.py                # Prompt 组装
       ├─ llm.py                    # LLM 普通调用、流式调用、记忆分级、意图分类
-      └─ graph.py                  # 流式 NPC 对话引擎
+      └─ graph.py                  # 流式 NPC 对话引擎（NpcConversationEngine）
 ```
 
 ---
 
 ## 启动命令（完整步骤）
 
-### 1) 进入项目目录并安装依赖
+### 1) 安装依赖
 
 ```bash
-cd d:\otherwise\demo\ai-roguelite-web
 pip install -r requirements.txt
 ```
 
@@ -67,16 +68,26 @@ python scripts/import_persona_setting.py --npc-id ember_01
 - 角色设定（`memory_type=persona`）为**覆盖导入**：重新执行会替换指定 `npc_id` 的 persona seed。
 - 对话记忆（`memory_type=dialogue`）为**运行时追加**：不会被导入脚本清空。
 
-### 3) 启动服务
+### 3) 启动 NPC API 服务（终端 1）
 
 ```bash
 python run.py
 ```
 
-### 4) 打开页面
+监听 `http://127.0.0.1:5100`，提供 `/api/command` 和 `/api/chat/stream`。
+
+### 4) 启动游戏静态服务器（终端 2）
+
+```bash
+python run_game.py
+```
+
+监听 `http://127.0.0.1:8080`，托管 `game/` 目录。
+
+### 5) 打开游戏页面
 
 ```text
-http://127.0.0.1:5100
+http://127.0.0.1:8080
 ```
 
 ---
@@ -220,9 +231,20 @@ chat_completion_stream()
 
 ## 当前实现范围
 
-- 单 NPC（`ember_01`）对话
-- HTTP 流式对话输出（`/api/chat/stream`）
-- NDJSON 事件流（`meta` / `delta` / `done` / `error`）
+**游戏端（`game/`）**
+
+- 2D 俯视战斗，WASD 移动、空格射击
+- 无限关卡：每层清空后自动进入下一层，敌人数量/血量/速度随层数递增
+- 三种障碍物布局按层循环，玩家/NPC/敌人/子弹均有碰撞
+- 场景信息传递当前层数（`floor`）给 NPC 后端
+- NPC 情绪颜文字展示（7 种情绪）
+
+**NPC 后端（`server/`）**
+
+- 前后端分离，Flask 仅提供 API，支持跨域（CORS）
+- HTTP 流式对话输出（`/api/chat/stream`，NDJSON 格式）
+- NPC 回复携带情绪标签，后端解析后随 `done` 事件返回
+- 流结束后后台异步写入短期记忆与长期记忆
 - Chroma 长期记忆标签分层：
   - `memory_type=world`（世界观，全局共享）
   - `memory_type=persona`（角色设定，按 `npc_id` 隔离）

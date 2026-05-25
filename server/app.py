@@ -1,10 +1,11 @@
-"""Web demo server with built-in single NPC backend."""
+"""NPC API server — 只提供 AI 接口，不托管游戏静态文件。"""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, request, stream_with_context
+from flask_cors import CORS
 
 from server.npc_backend.graph import NpcConversationEngine
 from server.npc_backend.llm import classify_intent
@@ -12,12 +13,9 @@ from server.npc_backend.schemas import ChatRequest, CommandResponse
 
 
 def create_app() -> Flask:
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder=None)
+    CORS(app)
     engine = NpcConversationEngine()
-
-    @app.get("/")
-    def index() -> str:
-        return render_template("index.html")
 
     @app.get("/health")
     def health() -> tuple[Any, int]:
@@ -50,9 +48,9 @@ def create_app() -> Flask:
 
         payload = {
             "player_id": req.player_id,
-            "npc_id": req.npc_id,
-            "npc_name": req.npc_name,
-            "message": req.message,
+            "npc_id":    req.npc_id,
+            "npc_name":  req.npc_name,
+            "message":   req.message,
             "scene_info": req.scene_info,
         }
 
@@ -64,12 +62,12 @@ def create_app() -> Flask:
     @app.post("/api/command")
     def api_command() -> tuple[Any, int]:
         """
-        轻量指令分类接口：判断玩家输入是"对话"还是"战术指令"。
-        指令时返回 stance + NPC 确认短句；对话时返回 type=dialogue 由前端转发 /api/chat/stream。
+        轻量意图分类接口：判断玩家输入是战术指令还是普通对话。
+        指令时返回 stance + NPC 确认短句；对话时返回 type=dialogue。
         """
         body = request.get_json(force=True, silent=True) or {}
-        message = str(body.get("message", "")).strip()
-        npc_name = str(body.get("npc_name", "")).strip() or None
+        message   = str(body.get("message",  "")).strip()
+        npc_name  = str(body.get("npc_name", "")).strip() or None
         scene_info = body.get("scene_info") or {}
 
         if not message:
