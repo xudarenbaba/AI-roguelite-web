@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
 from openai import OpenAI
@@ -39,6 +40,24 @@ def chat_completion(messages: list[dict[str, str]]) -> str:
     if not choice or not choice.message:
         return ""
     return (choice.message.content or "").strip()
+
+
+def chat_completion_stream(messages: list[dict[str, str]]) -> Iterator[str]:
+    """逐 token yield 文本 delta，不处理业务状态和记忆。"""
+    cfg = load_config().get("llm", {})
+    stream = _client().chat.completions.create(
+        model=cfg.get("model", "deepseek-chat"),
+        messages=messages,
+        temperature=float(cfg.get("temperature", 0.3)),
+        timeout=int(cfg.get("timeout_s", 60)),
+        stream=True,
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
 
 
 def classify_intent(

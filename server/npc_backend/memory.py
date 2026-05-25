@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,22 @@ class MemoryStore:
         try:
             result = coll.query(
                 query_embeddings=[_embed_texts([query])[0]],
+                n_results=limit,
+                where=where,
+                include=["documents"],
+            )
+            documents = result.get("documents", [[]])[0] if result else []
+            return [doc for doc in documents if doc]
+        except Exception:
+            return []
+
+    def _query_with_embedding(
+        self, embedding: list[float], where: dict[str, Any], limit: int
+    ) -> list[str]:
+        coll = self._collection()
+        try:
+            result = coll.query(
+                query_embeddings=[embedding],
                 n_results=limit,
                 where=where,
                 include=["documents"],
@@ -218,4 +235,54 @@ class MemoryStore:
                 }
             ],
         )
+
+    def search_context(
+        self, query: str, player_id: str, npc_id: str
+    ) -> dict[str, list[str]]:
+        """query 只 embed 一次，并行查询四路记忆，返回结构化上下文。"""
+        embedding = _embed_texts([query])[0]
+
+        tasks = {
+            "world_chunks": (
+                {"memory_type": "world", "npc_id": "global"},
+                self._k_world,
+            ),
+            "persona_chunks": (
+                {"memory_type": "persona", "npc_id": npc_id},
+                self._k_persona,
+            ),
+            "dialogue_daily_chunks": (
+                {
+                    "memory_type": "dialogue",
+                    "dialogue_tier": "daily",
+                    "player_id": player_id,
+                    "npc_id": npc_id,
+                },
+                self._k_daily,
+            ),
+            "dialogue_important_chunks": (
+                {
+                    "memory_type": "dialogue",
+                    "dialogue_tier": "important",
+                    "player_id": player_id,
+                    "npc_id": npc_id,
+                },
+                self._k_important,
+            ),
+        }
+
+        results: dict[str, list[str]] = {}
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(self._query_with_embedding, embedding, where, limit): key
+                for key, (where, limit) in tasks.items()
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception:
+                    results[key] = []
+
+        return results
 

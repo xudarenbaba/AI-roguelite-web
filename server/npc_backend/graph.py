@@ -1,131 +1,128 @@
 from __future__ import annotations
 
-from typing import Any, TypedDict
-
-from langgraph.graph import END, StateGraph
+import json
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from server.npc_backend.config import load_config
-from server.npc_backend.llm import chat_completion, classify_dialogue_memory
+from server.npc_backend.llm import chat_completion_stream, classify_dialogue_memory
 from server.npc_backend.memory import MemoryStore
 from server.npc_backend.prompts import build_messages
 from server.npc_backend.schemas import ChatAction
 from server.npc_backend.short_term import ShortTermMemory
 
 
-class ChatState(TypedDict, total=False):
-    player_id: str
-    npc_id: str
-    npc_name: str | None
-    message: str
-    scene_info: dict[str, Any]
-    short_term_history: list[dict[str, Any]]
-    world_chunks: list[str]
-    persona_chunks: list[str]
-    dialogue_daily_chunks: list[str]
-    dialogue_important_chunks: list[str]
-    action: ChatAction
-    memory_tier: str
-    memory_text: str
-
-
-class NpcGraphEngine:
+class NpcConversationEngine:
     def __init__(self) -> None:
         self._cfg = load_config()
         self._memory = MemoryStore()
         self._short_term = ShortTermMemory()
-        self._graph = self._build_graph()
 
-    def _build_graph(self):
-        def load_short_term(state: ChatState) -> ChatState:
-            player_id = state["player_id"]
-            npc_id = state["npc_id"]
-            state["short_term_history"] = self._short_term.get_recent(player_id, npc_id)
-            return state
+    def stream_chat(self, payload: dict[str, Any]) -> Iterator[str]:
+        """
+        主流式对话入口，逐行 yield NDJSON 字符串。
 
-        def retrieve_long_term(state: ChatState) -> ChatState:
-            player_id = state["player_id"]
-            npc_id = state["npc_id"]
-            query = f"scene={state.get('scene_info', {})}\nmessage={state['message']}"
-            state["world_chunks"] = self._memory.search_world(query)
-            state["persona_chunks"] = self._memory.search_persona(query, npc_id)
-            state["dialogue_daily_chunks"] = self._memory.search_dialogue_daily(query, player_id, npc_id)
-            state["dialogue_important_chunks"] = self._memory.search_dialogue_important(query, player_id, npc_id)
-            return state
+        事件类型：
+          meta  - 开始，携带 npc_id
+          delta - 模型 token 片段
+          done  - 完整结束，携带最终 ChatAction
+          error - 出错，携带 fallback
+        """
+        player_id: str = payload.get("player_id", "")
+        npc_id: str = payload.get("npc_id", "")
+        npc_name: str = payload.get("npc_name") or npc_id
+        message: str = payload.get("message", "")
+        scene_info: dict[str, Any] = payload.get("scene_info") or {}
 
-        def generate(state: ChatState) -> ChatState:
+        yield _event("meta", {"npc_id": npc_id})
+
+        try:
+            query = f"scene={scene_info}\nmessage={message}"
+
+            # 并行加载短期记忆和长期记忆上下文
+            short_term_history: list[dict[str, Any]] = []
+            long_term_ctx: dict[str, list[str]] = {}
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                fut_short = executor.submit(
+                    self._short_term.get_recent, player_id, npc_id
+                )
+                fut_long = executor.submit(
+                    self._memory.search_context, query, player_id, npc_id
+                )
+                for fut in as_completed([fut_short, fut_long]):
+                    if fut is fut_short:
+                        short_term_history = fut.result()
+                    else:
+                        long_term_ctx = fut.result()
+
             messages = build_messages(
-                npc_name=(state.get("npc_name") or state["npc_id"]),
-                player_message=state["message"],
-                scene_info=state.get("scene_info", {}),
-                world_chunks=state.get("world_chunks", []),
-                persona_chunks=state.get("persona_chunks", []),
-                dialogue_daily_chunks=state.get("dialogue_daily_chunks", []),
-                dialogue_important_chunks=state.get("dialogue_important_chunks", []),
-                short_term_history=state.get("short_term_history", []),
+                npc_name=npc_name,
+                player_message=message,
+                scene_info=scene_info,
+                world_chunks=long_term_ctx.get("world_chunks", []),
+                persona_chunks=long_term_ctx.get("persona_chunks", []),
+                dialogue_daily_chunks=long_term_ctx.get("dialogue_daily_chunks", []),
+                dialogue_important_chunks=long_term_ctx.get(
+                    "dialogue_important_chunks", []
+                ),
+                short_term_history=short_term_history,
             )
-            reply = chat_completion(messages) or "收到，我会继续和你协同。"
-            state["action"] = ChatAction(action_type="dialogue", dialogue=reply, emotion="focused")
-            return state
 
-        def write_short_term(state: ChatState) -> ChatState:
-            action = state.get("action")
-            if not action:
-                return state
+            full_reply_parts: list[str] = []
+            for delta in chat_completion_stream(messages):
+                full_reply_parts.append(delta)
+                yield _event("delta", {"text": delta})
+
+            full_reply = "".join(full_reply_parts).strip() or "收到，我会继续和你协同。"
+
+            # 写短期记忆
             self._short_term.add_turn(
-                player_id=state["player_id"],
-                npc_id=state["npc_id"],
-                role="user",
-                content=state["message"],
+                player_id=player_id, npc_id=npc_id, role="user", content=message
             )
             self._short_term.add_turn(
-                player_id=state["player_id"],
-                npc_id=state["npc_id"],
+                player_id=player_id,
+                npc_id=npc_id,
                 role="assistant",
-                content=action.dialogue,
+                content=full_reply,
             )
-            return state
 
-        def store_memory(state: ChatState) -> ChatState:
-            action = state.get("action")
-            if not action:
-                return state
+            # 分级并写长期记忆
             min_chars = int(self._cfg.get("memory", {}).get("min_store_chars", 6))
-            if len(action.dialogue.strip()) < min_chars:
-                return state
-            tier, text = classify_dialogue_memory(
-                player_message=state["message"],
-                npc_reply=action.dialogue,
-                scene_info=state.get("scene_info", {}),
+            if len(full_reply) >= min_chars:
+                tier, text = classify_dialogue_memory(
+                    player_message=message,
+                    npc_reply=full_reply,
+                    scene_info=scene_info,
+                )
+                self._memory.add_dialogue_memory(
+                    player_id=player_id,
+                    npc_id=npc_id,
+                    dialogue_tier=tier,
+                    text=text,
+                    scene_info=scene_info,
+                )
+
+            action = ChatAction(
+                action_type="dialogue", dialogue=full_reply, emotion="focused"
             )
-            self._memory.add_dialogue_memory(
-                player_id=state["player_id"],
-                npc_id=state["npc_id"],
-                dialogue_tier=tier,
-                text=text,
-                scene_info=state.get("scene_info", {}),
+            yield _event("done", {"action": action.model_dump(exclude_none=True)})
+
+        except Exception as exc:  # noqa: BLE001
+            fallback = ChatAction(
+                action_type="dialogue",
+                dialogue="本地 NPC 服务暂时繁忙，我会继续跟随你行动。",
+                emotion="neutral",
             )
-            state["memory_tier"] = tier
-            state["memory_text"] = text
-            return state
+            yield _event(
+                "error",
+                {
+                    "message": str(exc),
+                    "fallback": fallback.model_dump(exclude_none=True),
+                },
+            )
 
-        builder = StateGraph(ChatState)
-        builder.add_node("load_short_term", load_short_term)
-        builder.add_node("retrieve_long_term", retrieve_long_term)
-        builder.add_node("generate", generate)
-        builder.add_node("write_short_term", write_short_term)
-        builder.add_node("store_memory", store_memory)
-        builder.set_entry_point("load_short_term")
-        builder.add_edge("load_short_term", "retrieve_long_term")
-        builder.add_edge("retrieve_long_term", "generate")
-        builder.add_edge("generate", "write_short_term")
-        builder.add_edge("write_short_term", "store_memory")
-        builder.add_edge("store_memory", END)
-        return builder.compile()
 
-    def invoke(self, payload: dict[str, Any]) -> ChatAction:
-        state = self._graph.invoke(payload)
-        action = state.get("action")
-        if action is None:
-            return ChatAction(action_type="dialogue", dialogue="（思考中……）", emotion="neutral")
-        return action
-
+def _event(event_type: str, data: dict[str, Any]) -> str:
+    return json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"

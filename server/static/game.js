@@ -83,6 +83,24 @@ function appendMessage(role, text) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function appendStreamingNpcMessage() {
+  const el = document.createElement("div");
+  el.className = "msg npc";
+  el.textContent = "烬：";
+  chatLog.appendChild(el);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return {
+    append(delta) {
+      el.textContent += delta;
+      chatLog.scrollTop = chatLog.scrollHeight;
+    },
+    finish(finalText) {
+      el.textContent = `烬：${finalText}`;
+      chatLog.scrollTop = chatLog.scrollHeight;
+    },
+  };
+}
+
 function normalize(dx, dy) {
   const len = Math.hypot(dx, dy);
   if (len < 0.0001) {
@@ -564,16 +582,58 @@ async function sendDialogue(message) {
     message,
     scene_info: buildSceneInfo(),
   };
-  const resp = await fetch("/api/chat", {
+
+  const resp = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await resp.json();
-  const action = (data && data.fallback) ? data.fallback : (data || {});
-  const text = action.dialogue || "收到，我会继续和你协同。";
-  appendMessage("npc", text);
-  setAllyBubble(text);
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  const msgNode = appendStreamingNpcMessage();
+
+  let accumulated = "";
+  let buffer = "";
+  let bubbleThrottle = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let evt;
+      try {
+        evt = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+
+      if (evt.type === "delta") {
+        accumulated += evt.text;
+        msgNode.append(evt.text);
+        const now = Date.now();
+        if (now - bubbleThrottle > 100) {
+          setAllyBubble(accumulated);
+          bubbleThrottle = now;
+        }
+      } else if (evt.type === "done") {
+        const finalText = evt.action?.dialogue || accumulated || "收到，我会继续和你协同。";
+        msgNode.finish(finalText);
+        setAllyBubble(finalText);
+      } else if (evt.type === "error") {
+        const fallbackText = evt.fallback?.dialogue || "连接中断。我会继续执行上一条指令。";
+        msgNode.finish(fallbackText);
+        setAllyBubble(fallbackText);
+      }
+    }
+  }
 }
 
 chatForm.addEventListener("submit", async (e) => {
