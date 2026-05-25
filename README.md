@@ -1,5 +1,7 @@
 # AI Roguelite Web Demo (MVP)
 
+游戏客户端与 NPC API **完全分离**：`game/` 只负责页面与战斗逻辑，`server/` 只提供 AI 接口（不托管静态文件）。
+
 这是一个前后端分离的网页 Demo，包含：
 
 - 浏览器端 2D 战斗玩法（移动、射击、障碍物掩体、无限关卡）
@@ -23,7 +25,8 @@ ai-roguelite-web
 ├─ requirements.txt                # Python 依赖
 ├─ config.yaml                     # 当前生效配置
 ├─ config.example.yaml             # 配置模板
-├─ game                            # 游戏客户端（纯静态，独立于后端）
+├─ images/                         # README 截图
+├─ game/                           # 游戏客户端（纯静态，独立于后端）
 │  ├─ index.html
 │  ├─ game.js                      # 游戏逻辑：无限关卡、障碍物、NPC 对话
 │  └─ styles.css
@@ -33,9 +36,9 @@ ai-roguelite-web
 ├─ scripts
 │  ├─ import_world_setting.py      # 导入世界观设定到 Chroma
 │  └─ import_persona_setting.py    # 导入角色设定到 Chroma（需传 --npc-id）
-└─ server
-   ├─ app.py                       # NPC API 路由（/api/chat/stream、/api/command）
-   └─ npc_backend
+└─ server/                         # NPC API（无 static / templates）
+   ├─ app.py                       # Flask API + CORS（/api/chat/stream、/api/command、/health）
+   └─ npc_backend/
       ├─ config.py                 # 配置加载
       ├─ schemas.py                # 请求/响应结构（ChatRequest / CommandResponse）
       ├─ short_term.py             # 短期记忆（最近 N 轮）
@@ -44,6 +47,29 @@ ai-roguelite-web
       ├─ llm.py                    # LLM 普通调用、流式调用、记忆分级、意图分类
       └─ graph.py                  # 流式 NPC 对话引擎（NpcConversationEngine）
 ```
+
+---
+
+## 架构
+
+```text
+浏览器  http://127.0.0.1:8080
+    │   game/index.html + game.js + styles.css
+    │   （run_game.py 静态托管）
+    │
+    └── fetch ──▶  http://127.0.0.1:5100
+                    NPC API（run.py）
+                    ├─ POST /api/command
+                    └─ POST /api/chat/stream
+```
+
+`game/game.js` 顶部配置 API 地址：
+
+```js
+const NPC_API = "http://127.0.0.1:5100";
+```
+
+部署时改为实际 NPC 服务地址即可，游戏端无需改后端代码。
 
 ---
 
@@ -169,8 +195,28 @@ NPC 初始姿态为**守护**。
   "npc_id": "ember_01",
   "npc_name": "烬",
   "message": "这里有多少敌人？",
-  "scene_info": { "enemy_count": 3 }
+  "scene_info": {
+    "mode": "battle",
+    "floor": 1,
+    "ally_stance": "guard",
+    "player_hp": 120,
+    "ally_hp": 150,
+    "enemy_count": 3,
+    "boss_alive": true
+  }
 }
+```
+
+`scene_info` 由游戏端 `buildSceneInfo()` 组装，常见字段：
+
+| 字段 | 说明 |
+|---|---|
+| `floor` | 当前关卡层数 |
+| `mode` | 场景模式，如 `battle` |
+| `ally_stance` | NPC 姿态：`guard` / `assault` / `skirmish` |
+| `player_hp` / `ally_hp` | 双方当前血量 |
+| `enemy_count` | 场上敌人数 |
+| `boss_alive` | Boss 是否存活 |
 ```
 
 响应流示例：
@@ -189,7 +235,7 @@ NPC 初始姿态为**守护**。
 | `player_id` | 是 | 玩家唯一 ID，用于记忆检索隔离 |
 | `npc_id` | 是 | NPC 唯一 ID，作为记忆检索主键 |
 | `message` | 是 | 玩家输入内容 |
-| `scene_info` | 否 | 当前场景信息（敌人数量、位置等） |
+| `scene_info` | 否 | 当前场景信息（含 `floor`、血量、姿态、敌人数等） |
 | `npc_name` | 否 | NPC 显示名，不传则使用 `npc_id` |
 
 ---
@@ -217,7 +263,9 @@ chat_completion_stream()
   ↓
 前端 TextDecoder 读取并逐块更新 NPC 消息
   ↓
-流结束后写入短期记忆和长期记忆
+发送 done（含 dialogue + emotion）
+  ↓
+后台线程异步写入短期记忆与长期记忆（不阻塞前端）
 ```
 
 长期记忆检索由 `MemoryStore.search_context()` 统一完成。它会对当前 query 只计算一次 embedding，然后并行查询四类 Chroma 记忆：
