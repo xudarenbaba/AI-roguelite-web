@@ -7,6 +7,27 @@ const chatLog = document.getElementById("chatLog");
 const chatForm = document.getElementById("chatForm");
 const chatInput = document.getElementById("chatInput");
 
+const FLOOR_META = [
+  { name: "拔舌狱", tone: "#542127", accent: "#c65f52", haze: "#2a0f12", hint: "妄言会在这里变成锁链，少站直线位。" },
+  { name: "剪刀狱", tone: "#4a202b", accent: "#ce7a6e", haze: "#1f1016", hint: "敌群会连线增伤，优先切断牵引目标。" },
+  { name: "铁树狱", tone: "#40272c", accent: "#ad7c5a", haze: "#171115", hint: "冲刺别贪，刺林会惩罚错误位移。" },
+  { name: "孽镜狱", tone: "#2f2638", accent: "#8f7fe0", haze: "#120f1d", hint: "镜像会复刻行动，先辨认真身再集火。" },
+  { name: "蒸笼狱", tone: "#5b2a1d", accent: "#de8a58", haze: "#24120f", hint: "热压会叠层，别在闷区久留。" },
+  { name: "铜柱狱", tone: "#5a2e19", accent: "#d88946", haze: "#28150a", hint: "火线扩散很快，卡掩体边缘走。" },
+  { name: "刀山狱", tone: "#402826", accent: "#ba8f88", haze: "#1b1314", hint: "地形比怪更危险，先抢安全落脚点。" },
+  { name: "冰山狱", tone: "#1d2a3f", accent: "#7ab8d1", haze: "#101722", hint: "冻结后伤害翻倍，别硬吃连续弹道。" },
+  { name: "油锅狱", tone: "#52301a", accent: "#d48e4f", haze: "#23160b", hint: "油溅有抛物轨迹，保持横向机动。" },
+  { name: "牛坑狱", tone: "#3f281f", accent: "#be7c57", haze: "#190f0a", hint: "冲锋波次会连段，留一个位移保命。" },
+  { name: "石压狱", tone: "#3f3132", accent: "#a6978d", haze: "#161314", hint: "塌陷有读秒，宁可少打也别贪刀。" },
+  { name: "舂臼狱", tone: "#49352b", accent: "#b89271", haze: "#19120f", hint: "节拍是活路，跟着环境节律移动。" },
+  { name: "血池狱", tone: "#5a1f29", accent: "#d66b73", haze: "#2a0e14", hint: "侵蚀会滚雪球，别在血潭硬站桩。" },
+  { name: "枉死狱", tone: "#30212d", accent: "#a88db9", haze: "#18101d", hint: "怨魂会扰乱目标，先解控再输出。" },
+  { name: "磔刑狱", tone: "#4f2623", accent: "#d37669", haze: "#220f0f", hint: "分部位破坏更高效，别均摊伤害。" },
+  { name: "火山狱", tone: "#66261c", accent: "#ee7b42", haze: "#2e120a", hint: "喷发前有前兆，提前换位。" },
+  { name: "石磨狱", tone: "#41332a", accent: "#b8a27d", haze: "#1c1410", hint: "碾压周期固定，记住三拍后撤。" },
+  { name: "无间边狱", tone: "#2a182b", accent: "#b070da", haze: "#140b16", hint: "终层按因果结算，稳住比抢速更重要。" },
+];
+
 const state = {
   player: { x: 180, y: 260, radius: 14, hp: 160, maxHp: 160, speed: 220, attackCd: 0, shieldCd: 0 },
   ally: {
@@ -34,6 +55,7 @@ const state = {
   floor: 1,
   floorState: "playing", // "playing" | "clear"
   transitionTimer: 0,
+  cinders: [],
 };
 
 // ── 关卡配置 ──────────────────────────────────────────────────────────────────
@@ -147,14 +169,6 @@ function moveWithCollision(entity, dx, dy) {
 
 // ── 关卡过渡 ──────────────────────────────────────────────────────────────────
 
-const FLOOR_COMMENTS = [
-  "下一层了，精神一点。",
-  "别大意，敌人变强了。",
-  "继续推，你还能撑。",
-  "越来越深了，注意掩体。",
-  "别站在开阔地带，会被打穿的。",
-];
-
 function nextFloor() {
   state.playerBullets = [];
   state.allyBullets = [];
@@ -165,8 +179,8 @@ function nextFloor() {
   state.ally.hp   = Math.min(state.ally.maxHp,   state.ally.hp   + 40);
   generateObstacles();
   spawnEnemies();
-  const comment = FLOOR_COMMENTS[Math.floor(Math.random() * FLOOR_COMMENTS.length)];
-  setAllyBubble(`第 ${state.floor} 层。${comment}`);
+  const meta = FLOOR_META[(state.floor - 1) % FLOOR_META.length];
+  setAllyBubble(`第 ${state.floor} 层 ${meta.name}。${meta.hint}`);
 }
 
 function updateFloorTransition(dt) {
@@ -199,7 +213,7 @@ function setAllyBubble(text) {
 function appendMessage(role, text) {
   const el = document.createElement("div");
   el.className = `msg ${role}`;
-  el.textContent = role === "player" ? `你：${text}` : `烬：${text}`;
+  el.textContent = role === "player" ? `你：${text}` : `${NPC_DISPLAY_NAME}：${text}`;
   chatLog.appendChild(el);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
@@ -221,7 +235,7 @@ function emotionKaomoji(emotion) {
 function appendStreamingNpcMessage() {
   const el = document.createElement("div");
   el.className = "msg npc";
-  el.textContent = "烬：";
+  el.textContent = `${NPC_DISPLAY_NAME}：`;
   chatLog.appendChild(el);
   chatLog.scrollTop = chatLog.scrollHeight;
   return {
@@ -231,7 +245,7 @@ function appendStreamingNpcMessage() {
     },
     finish(finalText, emotion) {
       const kaomoji = emotionKaomoji(emotion);
-      el.textContent = `烬 ${kaomoji}：${finalText}`;
+      el.textContent = `${NPC_DISPLAY_NAME} ${kaomoji}：${finalText}`;
       chatLog.scrollTop = chatLog.scrollHeight;
     },
   };
@@ -507,46 +521,141 @@ function checkDefeat() {
 
 // ── 渲染 ──────────────────────────────────────────────────────────────────────
 
-function drawBackground() {
-  ctx.fillStyle = "#1a1f2b";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = "rgba(130, 145, 190, 0.10)";
-  for (let i = 0; i < canvas.width; i += 48) {
-    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
-  }
-  for (let j = 0; j < canvas.height; j += 48) {
-    ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
+function ensureCinders() {
+  if (state.cinders.length > 0) return;
+  for (let i = 0; i < 90; i += 1) {
+    state.cinders.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vy: -(18 + Math.random() * 20),
+      size: Math.random() < 0.2 ? 2 : 1,
+      flicker: Math.random() * Math.PI * 2,
+    });
   }
 }
 
+function drawBackground(dt) {
+  ensureCinders();
+  const meta = FLOOR_META[(state.floor - 1) % FLOOR_META.length];
+  const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  grad.addColorStop(0, meta.tone);
+  grad.addColorStop(1, meta.haze);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.strokeStyle = "rgba(255, 191, 160, 0.07)";
+  for (let i = 0; i < canvas.width; i += 40) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0);
+    ctx.lineTo(i, canvas.height);
+    ctx.stroke();
+  }
+  for (let j = 0; j < canvas.height; j += 40) {
+    ctx.beginPath();
+    ctx.moveTo(0, j);
+    ctx.lineTo(canvas.width, j);
+    ctx.stroke();
+  }
+
+  const sigilX = canvas.width * 0.78;
+  const sigilY = canvas.height * 0.5;
+  ctx.strokeStyle = `${meta.accent}55`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(sigilX, sigilY, 74, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(sigilX, sigilY, 46, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  state.cinders.forEach((c) => {
+    c.y += c.vy * dt;
+    c.x += Math.sin((performance.now() / 900) + c.flicker) * 0.2;
+    if (c.y < -4) {
+      c.y = canvas.height + Math.random() * 20;
+      c.x = Math.random() * canvas.width;
+    }
+    ctx.fillStyle = Math.sin((performance.now() / 500) + c.flicker) > 0 ? `${meta.accent}bb` : `${meta.accent}66`;
+    ctx.fillRect(c.x, c.y, c.size, c.size);
+  });
+}
+
 function drawObstacles() {
+  const meta = FLOOR_META[(state.floor - 1) % FLOOR_META.length];
   state.obstacles.forEach((o) => {
-    ctx.fillStyle = "#2a3040";
+    ctx.fillStyle = `${meta.haze}dd`;
     ctx.fillRect(o.x, o.y, o.w, o.h);
-    ctx.strokeStyle = "#4a5a7a";
+    ctx.strokeStyle = `${meta.accent}aa`;
     ctx.lineWidth = 2;
     ctx.strokeRect(o.x, o.y, o.w, o.h);
+    ctx.fillStyle = `${meta.accent}22`;
+    ctx.fillRect(o.x + 6, o.y + 6, o.w - 12, 6);
     ctx.lineWidth = 1;
   });
 }
 
-function drawCharacter(entity, color, hpColor) {
+function drawPixelSprite(entity, palette, dir = 1) {
+  const px = 4;
+  const originX = Math.floor(entity.x - 6 * px);
+  const originY = Math.floor(entity.y - 8 * px);
+  const head = [
+    "0011111100",
+    "0112222210",
+    "0123333321",
+    "0123333321",
+    "0012332100",
+  ];
+  const body = [
+    "0001441000",
+    "0014444100",
+    "0144544410",
+    "0144444410",
+    "0014545100",
+    "0015005100",
+  ];
+  const rows = [...head, ...body];
+  const map = { "1": palette.outline, "2": palette.skin, "3": palette.eye, "4": palette.cloth, "5": palette.trim };
+
+  // 先画一个高可见底座，避免深色关卡里角色不可辨认
   ctx.beginPath();
-  ctx.fillStyle = color;
-  ctx.arc(entity.x, entity.y, entity.radius, 0, Math.PI * 2);
+  ctx.fillStyle = palette.base || "rgba(245, 220, 200, 0.28)";
+  ctx.arc(entity.x, entity.y, entity.radius + 2, 0, Math.PI * 2);
   ctx.fill();
+  ctx.beginPath();
+  ctx.strokeStyle = palette.baseStroke || "rgba(255, 230, 200, 0.45)";
+  ctx.lineWidth = 1.5;
+  ctx.arc(entity.x, entity.y, entity.radius + 2, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  rows.forEach((row, rowIdx) => {
+    [...row].forEach((cell, colIdx) => {
+      if (cell === "0") return;
+      const drawCol = dir > 0 ? colIdx : row.length - colIdx - 1;
+      ctx.fillStyle = map[cell];
+      ctx.fillRect(originX + drawCol * px, originY + rowIdx * px, px, px);
+    });
+  });
+
   const w = entity.radius * 2;
   const hpRatio = clampUnit(entity.hp / (entity.maxHp || 100), 0, 1);
   ctx.fillStyle = "#101317";
   ctx.fillRect(entity.x - entity.radius, entity.y - entity.radius - 10, w, 4);
-  ctx.fillStyle = hpColor;
+  ctx.fillStyle = palette.hp || "#9fe4ff";
   ctx.fillRect(entity.x - entity.radius, entity.y - entity.radius - 10, w * hpRatio, 4);
 }
 
 function drawBullets() {
   const drawSet = (arr, color) => {
     ctx.fillStyle = color;
-    arr.forEach((b) => { ctx.beginPath(); ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2); ctx.fill(); });
+    arr.forEach((b) => {
+      const x = Math.floor(b.x);
+      const y = Math.floor(b.y);
+      ctx.fillRect(x - 1, y - 1, 3, 3);
+      ctx.fillRect(x - 2, y, 1, 1);
+      ctx.fillRect(x + 2, y, 1, 1);
+    });
   };
   drawSet(state.playerBullets, "#6bc8ff");
   drawSet(state.allyBullets,   "#9af19b");
@@ -571,6 +680,14 @@ function drawAllyBubble() {
 }
 
 function drawOverlay() {
+  const meta = FLOOR_META[(state.floor - 1) % FLOOR_META.length];
+  ctx.fillStyle = "#f8d1b4";
+  ctx.font = "bold 16px Segoe UI";
+  ctx.fillText(`第 ${state.floor} 层：${meta.name}`, 16, 26);
+  ctx.fillStyle = "#f2b48f";
+  ctx.font = "13px Segoe UI";
+  ctx.fillText(`狱律提示：${meta.hint}`, 16, 46);
+
   if (state.floorState === "clear") {
     ctx.fillStyle = "rgba(6, 8, 12, 0.70)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -595,13 +712,19 @@ function drawOverlay() {
   }
 }
 
-function render() {
-  drawBackground();
+function render(dt) {
+  drawBackground(dt);
   drawObstacles();
-  drawCharacter(state.player, "#4ea7ff", "#8dd0ff");
-  drawCharacter(state.ally,   "#8fdb8a", "#b8f7b6");
+  drawPixelSprite(state.player, { outline: "#1f2f39", skin: "#e1bfa1", eye: "#6ec4ff", cloth: "#3f86c2", trim: "#9fe4ff", hp: "#8dd0ff" }, 1);
+  drawPixelSprite(state.ally, { outline: "#2f1d14", skin: "#d7b399", eye: "#ffb77f", cloth: "#6e3d2a", trim: "#d08c55", base: "rgba(255, 188, 132, 0.30)", baseStroke: "rgba(255, 202, 160, 0.60)", hp: "#b8f7b6" }, 1);
   state.enemies.forEach((enemy) => {
-    drawCharacter(enemy, enemy.kind === "boss" ? "#c45757" : "#d78a55", "#ffd7a3");
+    drawPixelSprite(
+      enemy,
+      enemy.kind === "boss"
+        ? { outline: "#320d0d", skin: "#d7a299", eye: "#ffd1d1", cloth: "#a72f2f", trim: "#ff7d62", base: "rgba(255, 110, 94, 0.32)", baseStroke: "rgba(255, 138, 116, 0.60)", hp: "#ffd7d2" }
+        : { outline: "#321a13", skin: "#c79f86", eye: "#ffcc9c", cloth: "#8f4c35", trim: "#d98b5a", base: "rgba(240, 148, 112, 0.26)", baseStroke: "rgba(255, 178, 140, 0.5)", hp: "#ffd7a3" },
+      enemy.x < state.player.x ? -1 : 1,
+    );
   });
   drawBullets();
   drawAllyBubble();
@@ -610,8 +733,9 @@ function render() {
 
 function updateHud() {
   const stanceLabel = { assault: "突击", guard: "守护", skirmish: "游击" }[state.ally.stance] || state.ally.stance;
+  const floorName = FLOOR_META[(state.floor - 1) % FLOOR_META.length].name;
   hudStats.textContent =
-    `第 ${state.floor} 层 | 玩家 HP ${Math.floor(state.player.hp)} | 烬 HP ${Math.floor(state.ally.hp)} | 姿态 ${stanceLabel} | 敌人 ${state.enemies.length}`;
+    `${floorName}（第 ${state.floor} 层） | 玩家 HP ${Math.floor(state.player.hp)} | 乌枭 HP ${Math.floor(state.ally.hp)} | 姿态 ${stanceLabel} | 敌人 ${state.enemies.length}`;
 }
 
 // ── 主循环 ────────────────────────────────────────────────────────────────────
@@ -628,7 +752,7 @@ function loop(ts) {
   removeDeadEnemies();
   checkDefeat();
   updateFloorTransition(dt);
-  render();
+  render(dt);
   updateHud();
   requestAnimationFrame(loop);
 }
@@ -636,6 +760,9 @@ function loop(ts) {
 // ── 输入 ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("keydown", (e) => {
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD"].includes(e.code)) {
+    e.preventDefault();
+  }
   state.keys[e.code] = true;
   if (e.code === "Space") { e.preventDefault(); playerAttack(); }
 });
@@ -643,8 +770,9 @@ document.addEventListener("keyup", (e) => { state.keys[e.code] = false; });
 
 // ── NPC 对话 ──────────────────────────────────────────────────────────────────
 
-const NPC_ID   = "ember_01";
-const NPC_NAME = "烬";
+const NPC_ID   = "wuxiao_01";
+const NPC_NAME = "乌枭";
+const NPC_DISPLAY_NAME = "乌枭";
 const STANCE_LABELS = { assault: "突击", guard: "守护", skirmish: "游击" };
 
 function buildSceneInfo() {
@@ -750,5 +878,5 @@ chatForm.addEventListener("submit", async (e) => {
   }
 });
 
-appendMessage("npc", "系统在线。边战斗边下达指令。");
+appendMessage("npc", "黑签鬼差乌枭到位。你别乱送，我就能把你带到无间边狱。");
 requestAnimationFrame(loop);

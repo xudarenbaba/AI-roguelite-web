@@ -5,8 +5,8 @@
 body {
   margin: 0;
   font-family: "Segoe UI", Arial, sans-serif;
-  background: #0d0f16;
-  color: #e6eaf4;
+  background: radial-gradient(circle at 15% 15%, #2a1111 0%, #140b12 45%, #0b0a10 100%);
+  color: #f3e9dd;
 }
 
 .layout {
@@ -23,17 +23,42 @@ body {
   gap: 8px;
 }
 
+.lore-banner {
+  max-width: 960px;
+  padding: 12px 14px;
+  border: 1px solid #5d2e26;
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(63, 24, 24, 0.86), rgba(29, 17, 27, 0.92));
+  box-shadow: 0 0 0 1px rgba(167, 84, 69, 0.2) inset;
+}
+
+.lore-banner h1 {
+  margin: 0 0 6px;
+  color: #ffd9bf;
+  font-size: 18px;
+  letter-spacing: 0.6px;
+}
+
+.lore-banner p {
+  margin: 0;
+  color: #d9bca4;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 #gameCanvas {
   width: 100%;
   max-width: 960px;
-  border: 1px solid #334;
-  background: #1a1f2b;
+  border: 1px solid #6f3028;
+  background: #160f14;
+  image-rendering: pixelated;
+  box-shadow: 0 0 0 1px rgba(255, 154, 110, 0.15), 0 12px 26px rgba(0, 0, 0, 0.35);
 }
 
 .hud {
   padding: 10px;
-  background: #141926;
-  border: 1px solid #2c3651;
+  background: rgba(22, 12, 17, 0.9);
+  border: 1px solid #5e2d2b;
   border-radius: 8px;
 }
 
@@ -59,14 +84,14 @@ body {
 
 .tips {
   margin: 8px 0 0;
-  color: #a4aec9;
+  color: #e0b79f;
   font-size: 12px;
 }
 
 .chat-panel {
-  border: 1px solid #2c3651;
+  border: 1px solid #5e2d2b;
   border-radius: 8px;
-  background: #141926;
+  background: rgba(22, 12, 17, 0.9);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -76,15 +101,16 @@ body {
 .chat-panel h2 {
   margin: 0 0 10px;
   font-size: 18px;
+  color: #ffd6b5;
 }
 
 .chat-log {
   flex: 1;
-  border: 1px solid #2e3852;
+  border: 1px solid #4d272a;
   border-radius: 8px;
   padding: 8px;
   overflow-y: auto;
-  background: #0f1421;
+  background: #100c14;
 }
 
 .msg {
@@ -96,11 +122,13 @@ body {
 }
 
 .msg.player {
-  background: #2b3554;
+  background: #2d253f;
+  color: #f4ecff;
 }
 
 .msg.npc {
-  background: #243526;
+  background: #342218;
+  color: #ffe4ce;
 }
 
 #chatForm {
@@ -111,17 +139,17 @@ body {
 
 #chatInput {
   flex: 1;
-  border: 1px solid #334;
+  border: 1px solid #5c2f2f;
   border-radius: 6px;
-  background: #0f1421;
-  color: #e6eaf4;
+  background: #120d16;
+  color: #f6e6da;
   padding: 8px;
 }
 
 #chatForm button {
-  border: 1px solid #4d6dd9;
-  background: #3755b7;
-  color: white;
+  border: 1px solid #9a4f39;
+  background: linear-gradient(180deg, #a7533b, #7d3327);
+  color: #fff4ed;
   border-radius: 6px;
   padding: 8px 12px;
   cursor: pointer;

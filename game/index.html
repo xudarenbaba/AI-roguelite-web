@@ -9,20 +9,27 @@
   <body>
     <div class="layout">
       <section class="game-panel">
+        <div class="lore-banner">
+          <h1>《无间行录》：十八狱镇压行动</h1>
+          <p>
+            你是“阳差未绝”的魂体，坠入失序阴司。每通关一层地狱，就能修复一枚狱印、逼近篡狱真相。
+            你身边的鬼差“乌枭”嘴臭但懂规矩，别被他骂走神了。
+          </p>
+        </div>
         <canvas id="gameCanvas" width="960" height="540"></canvas>
         <div class="hud">
           <div id="hudStats"></div>
           <p class="tips">
-            移动：WASD/方向键 | 射击：空格 | 通过对话控制烬的姿态（守护 / 突击 / 游击）
+            移动：WASD/方向键 | 射击：空格 | 通过对话控制乌枭姿态（守护 / 突击 / 游击）
           </p>
         </div>
       </section>
 
       <aside class="chat-panel">
-        <h2>战友：烬</h2>
+        <h2>鬼差同盟：乌枭（黑签）</h2>
         <div id="chatLog" class="chat-log"></div>
         <form id="chatForm">
-          <input id="chatInput" autocomplete="off" maxlength="160" placeholder="输入战术指令或情绪交流..." />
+          <input id="chatInput" autocomplete="off" maxlength="160" placeholder="输入战术指令（例如：守护我 / 突击后排 / 游击拉扯）..." />
           <button type="submit">发送</button>
         </form>
       </aside>
