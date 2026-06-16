@@ -32,10 +32,11 @@ def _get_embed_model() -> SentenceTransformer:
     if not cache_dir.is_absolute():
         cache_dir = _project_root() / cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
+    local_files_only = bool(emb_cfg.get("local_files_only", False))
     _EMBED_MODEL = SentenceTransformer(
         model_name,
         cache_folder=str(cache_dir),
-        local_files_only=bool(emb_cfg.get("local_files_only", False)),
+        local_files_only=local_files_only,
     )
     return _EMBED_MODEL
 
