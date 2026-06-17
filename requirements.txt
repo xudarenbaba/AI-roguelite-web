@@ -5,3 +5,11 @@ openai>=1.40.0
 pydantic>=2.8.2
 pyyaml>=6.0.2
 sentence-transformers>=3.0.1
+
+# ── RL 训练依赖（仅训练时需要，游戏运行不需要）────────────────────────────────
+gymnasium>=0.29.0
+stable-baselines3>=2.3.0
+onnx>=1.16.0
+onnxruntime>=1.18.0
+onnxscript>=0.1.0
+tensorboard

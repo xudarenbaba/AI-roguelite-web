@@ -1,51 +1,61 @@
-# AI Roguelite Web Demo (MVP)
+# AI Roguelite Web Demo
 
 游戏客户端与 NPC API **完全分离**：`game/` 只负责页面与战斗逻辑，`server/` 只提供 AI 接口（不托管静态文件）。
 
-这是一个前后端分离的网页 Demo，包含：
+**特性：**
 
 - 浏览器端 2D 战斗玩法（移动、射击、障碍物掩体、无限关卡）
-- 单 NPC 流式对话后端（`Flask streaming + ChromaDB`）
+- 单 NPC 流式对话后端（Flask + ChromaDB，NDJSON 格式）
 - 通过自然语言控制 NPC 战术姿态（守护 / 突击 / 游击）
-- 记忆系统（短期记忆 + 长期记忆）
-- 长期记忆上下文并行检索（世界观设定 + 角色设定 + 对话历史）
+- 记忆系统：短期记忆（会话内） + 长期记忆（ChromaDB 持久化）
+- 意图分类与记忆检索**并行执行**，单次请求完成对话或战术切换
 - NPC 情绪系统（7 种情绪 + 颜文字展示）
+- **突击（assault）姿态**：使用强化学习（PPO）训练的策略网络，浏览器内 ONNX 推理控制 NPC 移动
 
 ---
 
 ![模拟游戏界面-1](images/img1.png)
 ![模拟游戏界面-2](images/img2.png)
 
-## 项目目录介绍
+---
+
+## 项目目录
 
 ```text
 ai-roguelite-web
 ├─ run.py                          # 启动 NPC API 服务（端口 5100）
-├─ run_game.py                     # 启动游戏静态文件服务（端口 8080）
-├─ requirements.txt                # Python 依赖
-├─ config.yaml                     # 当前生效配置
+├─ run_game.py                     # 启动游戏静态文件服务（端口 8081）
+├─ requirements.txt                # Python 依赖（含 RL 训练依赖）
+├─ config.yaml                     # 当前生效配置（gitignored）
 ├─ config.example.yaml             # 配置模板
 ├─ images/                         # README 截图
 ├─ game/                           # 游戏客户端（纯静态，独立于后端）
 │  ├─ index.html
-│  ├─ game.js                      # 游戏逻辑：无限关卡、障碍物、NPC 对话
-│  └─ styles.css
-├─ lore
-│  ├─ world_setting.md             # 世界观设定文档（用于导入 Chroma）
-│  └─ persona_setting.md           # 角色设定文档（用于导入 Chroma）
-├─ scripts
-│  ├─ import_world_setting.py      # 导入世界观设定到 Chroma
-│  └─ import_persona_setting.py    # 导入角色设定到 Chroma（需传 --npc-id）
+│  ├─ game.js                      # 游戏逻辑：战斗、NPC 控制、RL 推理
+│  ├─ styles.css
+│  └─ assault_policy.onnx          # RL 训练产出（训练并导出后放入此处）
+├─ rl/                             # 强化学习模块（独立，仅训练时使用）
+│  ├─ env.py                       # gymnasium 环境（精确复刻 game.js 物理）
+│  ├─ train.py                     # PPO 训练脚本
+│  ├─ export_onnx.py               # 导出 ONNX 模型
+│  ├─ checkpoints/                 # 训练检查点（自动创建）
+│  └─ logs/                        # TensorBoard 日志（自动创建）
+├─ lore/
+│  ├─ world_setting.md             # 世界观设定（导入 ChromaDB）
+│  └─ persona_setting.md           # 角色设定（导入 ChromaDB）
+├─ scripts/
+│  ├─ import_world_setting.py
+│  └─ import_persona_setting.py
 └─ server/                         # NPC API（无 static / templates）
-   ├─ app.py                       # Flask API + CORS（/api/chat/stream、/api/command、/health）
+   ├─ app.py                       # Flask 路由（/api/chat/stream、/health）
    └─ npc_backend/
-      ├─ config.py                 # 配置加载
-      ├─ schemas.py                # 请求/响应结构（ChatRequest / CommandResponse）
-      ├─ short_term.py             # 短期记忆（最近 N 轮）
-      ├─ memory.py                 # 长期记忆（Chroma：world / persona / dialogue）
+      ├─ config.py
+      ├─ schemas.py
+      ├─ short_term.py             # 短期记忆（会话内 deque）
+      ├─ memory.py                 # 长期记忆（ChromaDB）
       ├─ prompts.py                # Prompt 组装
-      ├─ llm.py                    # LLM 普通调用、流式调用、记忆分级、意图分类
-      └─ graph.py                  # 流式 NPC 对话引擎（NpcConversationEngine）
+      ├─ llm.py                    # LLM 调用：流式、意图分类、记忆分级
+      └─ graph.py                  # NpcConversationEngine：并行意图分类 + 流式对话
 ```
 
 ---
@@ -53,86 +63,88 @@ ai-roguelite-web
 ## 架构
 
 ```text
-浏览器  http://127.0.0.1:8080
+浏览器  http://127.0.0.1:8081
     │   game/index.html + game.js + styles.css
     │   （run_game.py 静态托管）
     │
+    │   ┌── assault 姿态移动 ──▶  onnxruntime-web（浏览器内推理）
+    │   │                         assault_policy.onnx（101维obs → 9动作）
+    │   │
     └── fetch ──▶  http://127.0.0.1:5100
                     NPC API（run.py）
-                    ├─ POST /api/command
                     └─ POST /api/chat/stream
+                         ├─ 意图分类 LLM  ┐ 并行执行
+                         ├─ 短期记忆检索  │
+                         └─ 长期记忆检索  ┘
+                              │
+                              ├─ command → yield command 事件（前端切姿态）
+                              └─ dialogue → yield delta/done 流式对话
 ```
 
-`game/game.js` 顶部配置 API 地址：
-
-```js
-const NPC_API = "http://127.0.0.1:5100";
-```
-
-部署时改为实际 NPC 服务地址即可，游戏端无需改后端代码。
+**对话/指令统一走 `/api/chat/stream` 单接口。** 服务端并行启动意图分类和记忆检索，分类完成后：
+- 识别为战术指令 → 直接返回 `command` 事件，记忆检索结果丢弃
+- 识别为对话 → 记忆检索结果（此时大概率已完成）直接用于构建 Prompt，开始流式输出
 
 ---
 
-## 启动命令（完整步骤）
+## 快速启动
 
-### 1) 安装依赖
+### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2) 导入基础设定到 ChromaDB
+> RL 训练依赖（`gymnasium`、`stable-baselines3` 等）包含在 `requirements.txt` 中，
+> 如只运行游戏不需要训练，可跳过这几行单独安装游戏运行依赖。
+
+### 2. 导入基础设定到 ChromaDB（仅首次）
 
 ```bash
 python scripts/import_world_setting.py
-python scripts/import_persona_setting.py --npc-id ember_01
+python scripts/import_persona_setting.py --npc-id wuxiao_01
 ```
 
-导入策略说明：
+- 世界观 / 角色设定为**覆盖导入**，重复执行会替换旧数据
+- 对话记忆（`memory_type=dialogue`）为运行时追加，不会被脚本清空
 
-- 世界观设定（`memory_type=world`）为**覆盖导入**：重新执行会替换旧的 world seed。
-- 角色设定（`memory_type=persona`）为**覆盖导入**：重新执行会替换指定 `npc_id` 的 persona seed。
-- 对话记忆（`memory_type=dialogue`）为**运行时追加**：不会被导入脚本清空。
-
-### 3) 启动 NPC API 服务（终端 1）
+### 3. 启动 NPC API（终端 1）
 
 ```bash
 python run.py
 ```
 
-监听 `http://127.0.0.1:5100`，提供 `/api/command` 和 `/api/chat/stream`。
+监听 `http://0.0.0.0:5100`，提供 `/api/chat/stream`、`/health`。
 
-### 4) 启动游戏静态服务器（终端 2）
+### 4. 启动游戏静态服务（终端 2）
 
 ```bash
 python run_game.py
 ```
 
-监听 `http://127.0.0.1:8080`，托管 `game/` 目录。
+监听 `http://127.0.0.1:8081`，托管 `game/` 目录。
 
-### 5) 打开游戏页面
+### 5. 打开游戏
 
-```text
-http://127.0.0.1:8080
+```
+http://127.0.0.1:8081
 ```
 
 ---
 
 ## 配置说明
 
-- 项目已包含 `config.yaml`，可直接运行
-- embedding 使用本地模式：`local_files_only: true`
-- 可通过环境变量覆盖 LLM 配置：
-  - `AI_NPC_LLM_API_KEY`
-  - `AI_NPC_LLM_BASE_URL`
-  - `AI_NPC_LLM_MODEL`
+复制 `config.example.yaml` 为 `config.yaml`（已 gitignore）。解析优先级（后者覆盖前者）：
 
-Windows PowerShell 示例：
+1. `server/npc_backend/config.py` 中的硬编码默认值
+2. `config.yaml`
+3. 环境变量：`AI_NPC_LLM_API_KEY` / `AI_NPC_LLM_BASE_URL` / `AI_NPC_LLM_MODEL`
 
-```powershell
-$env:AI_NPC_LLM_API_KEY="sk-xxxx"
-$env:AI_NPC_LLM_BASE_URL="https://api.deepseek.com"
-$env:AI_NPC_LLM_MODEL="deepseek-chat"
+```bash
+# 示例（macOS/Linux）
+export AI_NPC_LLM_API_KEY="sk-xxxx"
+export AI_NPC_LLM_BASE_URL="https://api.deepseek.com"
+export AI_NPC_LLM_MODEL="deepseek-chat"
 python run.py
 ```
 
@@ -140,60 +152,120 @@ python run.py
 
 ## NPC 战术控制
 
-NPC（烬）的战术姿态由玩家自然语言驱动，**无需按钮**。发送消息后后端先调用 `POST /api/command` 进行意图分类：
+玩家通过自然语言驱动 NPC 姿态，**无需任何按钮**。
 
 | 玩家输入示例 | 识别结果 | NPC 行为 |
 |---|---|---|
-| "回来保护我" / "别乱跑" | **守护（guard）** | 跟随玩家，攻击最近敌人 |
-| "上去打" / "压制它" | **突击（assault）** | 主动追击敌人，近距离激进输出 |
-| "先清小怪" / "游击打法" | **游击（skirmish）** | 优先清除最弱目标，灵活走位闪避 |
-| 其他对话内容 | **对话（dialogue）** | 转入 HTTP 流式对话流程 |
+| "回来保护我" / "别乱跑" | 守护（guard） | 贴近玩家，攻击最近敌人；玩家 HP ≤ 45 时自动救援 |
+| "上去打" / "压制它" | 突击（assault） | **RL 策略网络控制移动**，自动寻路绕障、躲避子弹 |
+| "先清小怪" / "游击打法" | 游击（skirmish） | 优先清除最弱目标，主动闪避弹道 |
+| 其他内容 | 对话（dialogue） | 流式对话，携带情绪标签 |
 
 NPC 初始姿态为**守护**。
 
 ---
 
-## API 接口说明
+## 突击姿态 RL 控制
 
-### `POST /api/command`
+### 判断是否正在使用 RL 模型
 
-意图分类接口，判断玩家输入是战术指令还是普通对话。
+切换到突击姿态后，**游戏界面顶部 HUD** 会实时显示当前控制模式：
 
-请求体：
+| HUD 显示 | 含义 |
+|---|---|
+| `姿态 突击 [RL 加载中…]` | 模型首次加载中（约 1-2 秒） |
+| `姿态 突击 [RL]` | RL 模型已就绪，正在控制移动 |
+| `姿态 突击 [RL 失败·规则]` | 模型加载失败，已降级为规则 AI |
+| `姿态 突击 [规则]` | 模型尚未触发加载 |
 
-```json
-{
-  "message": "回来保护我",
-  "npc_name": "烬",
-  "scene_info": {}
-}
+浏览器控制台（F12）也会打印：
+```
+[RL] assault_policy.onnx loaded, RL mode active.
 ```
 
-响应（指令）：
+### 模型文件
 
-```json
-{ "type": "command", "stance": "guard", "reply": "收到，我来护着你！" }
+`game/assault_policy.onnx` — 101 维观测输入，9 个离散动作输出（8方向移动 + 静止）。
+
+模型由 `rl/` 模块独立训练产出，游戏运行时**无需 Python，浏览器内直接推理**，延迟 < 1ms/帧。
+
+---
+
+## RL 训练（可选）
+
+`rl/` 模块与游戏服务端完全独立，只需要 Python 环境和 RL 依赖。
+
+### 训练
+
+```bash
+# 标准训练（2M 步，8 并行环境，约 1-2 小时 CPU）
+python -m rl.train
+
+# 指定步数
+python -m rl.train --timesteps 5000000
+
+# 快速验证环境是否正常（5 万步，几分钟，单进程）
+python -m rl.train --timesteps 50000 --run-name debug --no-subproc
+
+# 在上次基础上继续训练（resume）
+python -m rl.train --resume rl/checkpoints/assault_best/best_model.zip --timesteps 5000000
 ```
 
-响应（对话）：
+训练输出：
+- `rl/checkpoints/assault_best/best_model.zip` — 评估期间的最优模型（推荐导出此文件）
+- `rl/checkpoints/assault_v1_final.zip` — 训练结束时的最终模型
+- `rl/checkpoints/assault_*_steps.zip` — 每 20 万步的定期检查点
 
-```json
-{ "type": "dialogue" }
+### 导出 ONNX
+
+```bash
+# 导出 best_model（推荐）并验证推理结果一致性
+python -m rl.export_onnx --verify
+
+# 导出指定检查点
+python -m rl.export_onnx --model rl/checkpoints/assault_v1_final.zip --verify
+```
+
+输出 `rl/assault_policy.onnx`。
+
+### 部署到游戏
+
+```bash
+cp rl/assault_policy.onnx game/
+```
+
+重新加载游戏页面即可生效。
+
+### 完整流程（首次或增加训练步数）
+
+```bash
+# 1. 训练
+python -m rl.train --timesteps 5000000
+
+# 2. 导出
+python -m rl.export_onnx --verify
+
+# 3. 部署
+cp rl/assault_policy.onnx game/
+
+# 4. 刷新浏览器游戏页面，切换到突击姿态查看效果
 ```
 
 ---
 
+## API 接口
+
 ### `POST /api/chat/stream`
 
-流式对话接口。后端会先并行读取短期记忆和长期记忆上下文，再调用 LLM 流式生成 NPC 回复。响应格式为 **NDJSON**，即每行一个 JSON 事件。
+统一对话 + 指令接口。服务端并行执行意图分类和记忆检索，结果以 NDJSON 流返回。
 
 请求体：
 
 ```json
 {
   "player_id": "p1",
-  "npc_id": "ember_01",
-  "npc_name": "烬",
+  "npc_id": "wuxiao_01",
+  "npc_name": "乌枭",
   "message": "这里有多少敌人？",
   "scene_info": {
     "mode": "battle",
@@ -207,97 +279,77 @@ NPC 初始姿态为**守护**。
 }
 ```
 
-`scene_info` 由游戏端 `buildSceneInfo()` 组装，常见字段：
+响应事件类型：
 
-| 字段 | 说明 |
-|---|---|
-| `floor` | 当前关卡层数 |
-| `mode` | 场景模式，如 `battle` |
-| `ally_stance` | NPC 姿态：`guard` / `assault` / `skirmish` |
-| `player_hp` / `ally_hp` | 双方当前血量 |
-| `enemy_count` | 场上敌人数 |
-| `boss_alive` | Boss 是否存活 |
-```
+| 事件 | 触发时机 | 关键字段 |
+|---|---|---|
+| `meta` | 立即 | `npc_id` |
+| `command` | 识别为战术指令时 | `stance`、`reply` |
+| `delta` | 对话 token 批次 | `text`（每批约 8 字符） |
+| `done` | 对话流结束 | `action.dialogue`、`action.emotion` |
+| `error` | 出错 | `message`、`fallback` |
 
-响应流示例：
+对话响应示例：
 
 ```text
-{"type":"meta","npc_id":"ember_01"}
+{"type":"meta","npc_id":"wuxiao_01"}
 {"type":"delta","text":"三个，"}
 {"type":"delta","text":"别废话，跟上！"}
 {"type":"done","action":{"action_type":"dialogue","dialogue":"三个，别废话，跟上！","emotion":"focused"}}
 ```
 
-字段说明：
+指令响应示例：
 
-| 字段 | 必填 | 说明 |
-|---|---|---|
-| `player_id` | 是 | 玩家唯一 ID，用于记忆检索隔离 |
-| `npc_id` | 是 | NPC 唯一 ID，作为记忆检索主键 |
-| `message` | 是 | 玩家输入内容 |
-| `scene_info` | 否 | 当前场景信息（含 `floor`、血量、姿态、敌人数等） |
-| `npc_name` | 否 | NPC 显示名，不传则使用 `npc_id` |
+```text
+{"type":"meta","npc_id":"wuxiao_01"}
+{"type":"command","stance":"assault","reply":"好嘞，我去前面撕，你别拖后腿。"}
+```
+
+### `GET /health`
+
+```json
+{ "status": "ok" }
+```
 
 ---
 
 ## 对话链路
 
-普通对话的主链路：
-
 ```text
 game.js 表单提交
-  ↓
-POST /api/command
-  ↓
-type=dialogue 时调用 POST /api/chat/stream
-  ↓
-NpcConversationEngine.stream_chat()
-  ↓
-并行读取短期记忆 + 长期记忆上下文
-  ↓
-build_messages()
-  ↓
-chat_completion_stream()
-  ↓
-后端逐行返回 NDJSON delta
-  ↓
-前端 TextDecoder 读取并逐块更新 NPC 消息
-  ↓
-发送 done（含 dialogue + emotion）
-  ↓
-后台线程异步写入短期记忆与长期记忆（不阻塞前端）
+  │
+  └─ POST /api/chat/stream
+       │
+       ├─ 并行启动：① 意图分类 LLM  ② 短期记忆  ③ 长期记忆检索
+       │
+       ├─ 意图 = command
+       │    └─ yield command 事件 → 前端切换姿态，结束
+       │
+       └─ 意图 = dialogue
+            ├─ 等待记忆检索完成（通常已并行完成）
+            ├─ build_messages()
+            ├─ chat_completion_stream() → 逐批 yield delta
+            ├─ yield done（含 emotion）
+            └─ 后台线程异步写短期 + 长期记忆（不阻塞流）
 ```
 
-长期记忆检索由 `MemoryStore.search_context()` 统一完成。它会对当前 query 只计算一次 embedding，然后并行查询四类 Chroma 记忆：
+长期记忆一次 embedding，并行查询四类 ChromaDB 记录：
 
-- `world_chunks`：世界观设定，`memory_type=world`
-- `persona_chunks`：角色设定，`memory_type=persona`
-- `dialogue_daily_chunks`：日常对话记忆，`memory_type=dialogue` + `dialogue_tier=daily`
-- `dialogue_important_chunks`：重要对话记忆，`memory_type=dialogue` + `dialogue_tier=important`
+- `world_chunks`：世界观设定
+- `persona_chunks`：角色设定
+- `dialogue_daily_chunks`：日常对话摘要
+- `dialogue_important_chunks`：重要对话原文
 
 ---
 
-## 当前实现范围
+## 验证
 
-**游戏端（`game/`）**
+```bash
+# 健康检查
+curl http://127.0.0.1:5100/health
 
-- 2D 俯视战斗，WASD 移动、空格射击
-- 无限关卡：每层清空后自动进入下一层，敌人数量/血量/速度随层数递增
-- 三种障碍物布局按层循环，玩家/NPC/敌人/子弹均有碰撞
-- 场景信息传递当前层数（`floor`）给 NPC 后端
-- NPC 情绪颜文字展示（7 种情绪）
-
-**NPC 后端（`server/`）**
-
-- 前后端分离，Flask 仅提供 API，支持跨域（CORS）
-- HTTP 流式对话输出（`/api/chat/stream`，NDJSON 格式）
-- NPC 回复携带情绪标签，后端解析后随 `done` 事件返回
-- 流结束后后台异步写入短期记忆与长期记忆
-- Chroma 长期记忆标签分层：
-  - `memory_type=world`（世界观，全局共享）
-  - `memory_type=persona`（角色设定，按 `npc_id` 隔离）
-  - `memory_type=dialogue` + `dialogue_tier=daily|important`（对话历史）
-- 长期记忆一次 embedding + 四路并行检索
-- 短期记忆维持最近 N 轮上下文连续性
-- LLM 意图分类驱动 NPC 战术姿态切换
-- NPC 三种战术行为：守护 / 突击 / 游击
+# 流式对话
+curl -X POST http://127.0.0.1:5100/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"player_id":"p1","npc_id":"wuxiao_01","npc_name":"乌枭","message":"这里有多少敌人？","scene_info":{"mode":"battle","floor":1}}'
+```

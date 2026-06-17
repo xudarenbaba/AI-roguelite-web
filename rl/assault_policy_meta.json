@@ -1,0 +1,45 @@
+{
+  "obs_dim": 101,
+  "n_actions": 9,
+  "action_vectors": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      -1.0
+    ],
+    [
+      0.7071067811865476,
+      -0.7071067811865476
+    ],
+    [
+      1.0,
+      0.0
+    ],
+    [
+      0.7071067811865476,
+      0.7071067811865476
+    ],
+    [
+      0.0,
+      1.0
+    ],
+    [
+      -0.7071067811865476,
+      0.7071067811865476
+    ],
+    [
+      -1.0,
+      0.0
+    ],
+    [
+      -0.7071067811865476,
+      -0.7071067811865476
+    ]
+  ],
+  "model_file": "assault_policy.onnx",
+  "opset": 17,
+  "description": "assault stance RL policy. Input: float32[1, obs_dim]. Output: float32[1, 9] logits. Take argmax to get action index."
+}

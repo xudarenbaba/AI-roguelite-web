@@ -29,3 +29,12 @@ models/
 # 日志
 *.log
 logs/
+
+# RL 训练中间产物（不提交）
+rl/checkpoints/
+rl/logs/
+# 最终部署模型（提交）
+# game/assault_policy.onnx  ← 保持跟踪
+# rl/assault_policy.onnx    ← 导出源文件，可选提交
+!rl/assault_policy.onnx
+!rl/assault_policy_meta.json
