@@ -590,14 +590,19 @@ class AssaultEnv(gym.Env):
         fired_without_los: bool,
     ) -> float:
         """
-        v2 奖励函数设计：
+        v3 奖励函数设计：
 
         1. 伤害奖励        核心正奖励
         2. 受伤惩罚        权重高于伤害，迫使躲避
         3. 接近塑形        dist_delta > 0 时持续给小正奖励（势能函数）
-        4. 距离区间引导    精确射程内正奖励，过近/过远均惩罚（收紧阈值）
+        4. 距离+LOS 联合区间奖励
+           - 射程内且 LOS 通畅：最大正奖励（"有效攻击位"）
+           - 射程内但 LOS 遮挡：无正奖励 + 每帧持续惩罚（核心改动）
+           - 稍远且 LOS 通畅：小正奖励
+           - 过远：随距离加重惩罚
+           - 过近：轻微惩罚
         5. 动作平滑惩罚    与上帧方向相反时惩罚（抑制抽搐）
-        6. LOS 惩罚        视线被挡时开火惩罚（子弹白白浪费）
+        6. LOS 遮挡开火惩罚  仅开火事件（辅助信号）
         7. 死亡惩罚
         8. 胜利奖励
         9. 时间惩罚
@@ -605,44 +610,54 @@ class AssaultEnv(gym.Env):
         reward = 0.0
         ally   = self._ally
 
-        # 1. 伤害奖励（mob 一发 +1.04，boss 一发更高）
+        # 1. 伤害奖励（mob 一发 +1.04）
         reward += damage_dealt * 0.08
 
-        # 2. 受伤惩罚（比伤害权重高，确保"活着"优先于"输出"）
-        #    mob子弹5伤 → -0.60，boss子弹9伤 → -1.08
+        # 2. 受伤惩罚
         reward -= hp_lost * 0.12
 
-        # 3. 接近塑形：每帧靠近目标给小正奖励，远离给小负奖励
-        #    用势能函数平滑引导，避免 sparse reward 导致 agent 不知道怎么靠近
-        #    dist_delta 已经是像素值，归一化到合理量级
+        # 3. 接近塑形
         reward += dist_delta * 0.003
 
-        # 4. 距离区间奖励（收紧版）
+        # 4. 距离 + LOS 联合区间奖励
         if target is not None:
-            # 有效射程（55~110px）：最优区间，持续正奖励
-            if ASSAULT_KITE_RANGE < dist_now < ASSAULT_ATTACK_RANGE:
-                reward += 0.006
-            # 稍远区间（110~150px）：可以接受但不如射程内好，轻微正奖励
-            elif ASSAULT_ATTACK_RANGE <= dist_now < 150.0:
-                reward += 0.002
-            # 过远（>150px）：惩罚，比原来的 220px 阈值大幅收紧
-            elif dist_now >= 150.0:
-                excess = (dist_now - 150.0) / CANVAS_W   # 归一化超出距离
-                reward -= 0.008 + excess * 0.02           # 随距离加重
-            # 过近（<55px）：轻微惩罚
-            elif dist_now < ASSAULT_KITE_RANGE:
+            # 每帧计算一次 LOS（已在 obs 里算过，这里再算一次，cost 极低）
+            los = _has_line_of_sight(
+                ally.x, ally.y, target.x, target.y, self._obstacles
+            )
+
+            if dist_now < ASSAULT_KITE_RANGE:
+                # 过近：轻微惩罚，与 LOS 无关
                 reward -= 0.004
 
-        # 5. 动作平滑惩罚：与上帧方向相反时惩罚
-        #    判断方式：计算两帧动作向量的点积，< -0.5 认为方向相反
+            elif ASSAULT_KITE_RANGE <= dist_now < ASSAULT_ATTACK_RANGE:
+                # 有效射程内
+                if los:
+                    # LOS 通畅 + 射程内 = 最优"有效攻击位"，给最高持续正奖励
+                    reward += 0.010
+                else:
+                    # LOS 遮挡 + 射程内 = 无效站桩，每帧持续惩罚
+                    # 这是核心改动：让 agent 感受到"在遮挡位置等于每帧亏钱"
+                    reward -= 0.008
+
+            elif ASSAULT_ATTACK_RANGE <= dist_now < 150.0:
+                # 稍远区间：LOS 通畅给小正奖励，遮挡不给
+                if los:
+                    reward += 0.003
+
+            else:
+                # 过远（>150px）：随距离加重惩罚，与 LOS 无关
+                excess = (dist_now - 150.0) / CANVAS_W
+                reward -= 0.008 + excess * 0.02
+
+        # 5. 动作平滑惩罚
         prev_vec = ACTION_VECTORS[self._prev_action]
         curr_vec = ACTION_VECTORS[action]
         dot = prev_vec[0] * curr_vec[0] + prev_vec[1] * curr_vec[1]
-        # 静止动作（action=0）不参与平滑惩罚（静止是合理选择）
         if action != 0 and self._prev_action != 0 and dot < -0.5:
             reward -= 0.005
 
-        # 6. LOS 惩罚：视线被挡时开火，子弹白白撞障碍物
+        # 6. LOS 遮挡开火惩罚（辅助信号，配合第4条的帧惩罚共同作用）
         if fired_without_los:
             reward -= 0.04
 
@@ -654,7 +669,7 @@ class AssaultEnv(gym.Env):
         if len(self._enemies) == 0:
             reward += 50.0
 
-        # 9. 时间效率惩罚（鼓励速攻）
+        # 9. 时间效率惩罚
         reward -= 0.001
 
         return float(reward)
