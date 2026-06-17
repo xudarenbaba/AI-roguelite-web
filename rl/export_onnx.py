@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--opset",
         type=int,
-        default=17,
-        help="ONNX opset 版本（onnxruntime-web 推荐 17）",
+        default=12,
+        help="ONNX opset 版本（onnxruntime-web wasm 推荐 12，兼容性最好）",
     )
     return p.parse_args()
 
@@ -145,20 +145,22 @@ def main() -> None:
     dummy_obs = torch.zeros(1, OBS_DIM, dtype=torch.float32)
 
     print(f"Exporting to ONNX (opset {args.opset})...")
-    torch.onnx.export(
-        actor,
-        dummy_obs,
-        str(output_path),
-        export_params=True,
-        opset_version=args.opset,
-        do_constant_folding=True,
-        input_names=["obs"],
-        output_names=["logits"],
-        dynamic_axes={
-            "obs":    {0: "batch_size"},
-            "logits": {0: "batch_size"},
-        },
-    )
+    # 强制使用 TorchScript 路径（dynamo=False）以支持 opset < 18。
+    # torch >= 2.4 默认走 dynamo exporter（最低 opset 18），
+    # onnxruntime-web wasm 后端对 IR version 10 支持不稳定，需要降到 opset 12。
+    # batch 固定为 1（不设 dynamic_axes），wasm 后端兼容性最好。
+    with torch.no_grad():
+        torch.onnx.export(
+            actor,
+            dummy_obs,
+            str(output_path),
+            export_params=True,
+            opset_version=args.opset,
+            do_constant_folding=True,
+            input_names=["obs"],
+            output_names=["logits"],
+            dynamo=False,  # 强制 TorchScript 路径，兼容低 opset
+        )
 
     # 验证 ONNX 结构
     onnx_model = onnx.load(str(output_path))

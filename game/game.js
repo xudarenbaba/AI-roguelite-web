@@ -20,16 +20,30 @@ const _RL_ACTION_VECTORS = [
   [-0.7071, -0.7071],    // 8 左上
 ];
 
-// 与 rl/env.py 常量对齐
-const _RL_CANVAS_W       = 900.0;
-const _RL_CANVAS_H       = 540.0;
-const _RL_DIAG           = Math.hypot(_RL_CANVAS_W, _RL_CANVAS_H);  // ~1051
-const _RL_MAX_ENEMIES    = 5;
-const _RL_MAX_BULLETS    = 8;
-const _RL_MAX_OBSTACLES  = 4;
+// 与 rl/env.py 常量对齐（v2，OBS_DIM=121）
+const _RL_CANVAS_W        = 900.0;
+const _RL_CANVAS_H        = 540.0;
+const _RL_DIAG            = Math.hypot(_RL_CANVAS_W, _RL_CANVAS_H);  // ~1051
+const _RL_MAX_ENEMIES     = 5;
+const _RL_MAX_BULLETS     = 8;
+const _RL_MAX_OBSTACLES   = 4;
 const _RL_MAX_BULLET_DIST = 200.0;
-const _RL_OBS_DIM        = 6 + 6 + (_RL_MAX_ENEMIES - 1) * 5 + _RL_MAX_BULLETS * 5 + _RL_MAX_OBSTACLES * 6 + 4 + 1; // 101
 const _RL_ASSAULT_INTERVAL = 0.45;
+const _RL_N_ACTIONS       = 9;
+// 段长与 env.py 严格对齐
+const _RL_SEG1 = 7;
+const _RL_SEG2 = 8;
+const _RL_SEG3 = (_RL_MAX_ENEMIES - 1) * 5;   // 20
+const _RL_SEG4 = _RL_MAX_BULLETS * 6;          // 48
+const _RL_SEG5 = _RL_MAX_OBSTACLES * 6;        // 24
+const _RL_SEG6 = 4;
+const _RL_SEG7 = _RL_N_ACTIONS;               // 9
+const _RL_SEG8 = 1;
+const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8; // 121
+
+// 帧间状态：上帧动作（用于 one-hot 和平滑惩罚参考）、上帧到目标距离
+let _rlPrevAction = 0;
+let _rlPrevDistToTarget = 0.0;
 
 // 状态：null = 未加载，"loading" = 加载中，InferenceSession = 就绪，"error" = 失败
 let _rlSession = null;
@@ -39,15 +53,8 @@ async function _rlLoadModel() {
   if (_rlLoadState !== "idle") return;
   _rlLoadState = "loading";
   try {
-    // 动态加载 onnxruntime-web（首次使用时才加载，不阻塞游戏启动）
     if (typeof ort === "undefined") {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement("script");
-        s.src = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js";
-        s.onload = resolve;
-        s.onerror = () => reject(new Error("Failed to load onnxruntime-web"));
-        document.head.appendChild(s);
-      });
+      throw new Error("onnxruntime-web not loaded — check network or CDN");
     }
     ort.env.wasm.numThreads = 1;  // 避免 SharedArrayBuffer 跨域限制
     _rlSession = await ort.InferenceSession.create(_RL_MODEL_PATH, {
@@ -58,17 +65,43 @@ async function _rlLoadModel() {
     console.log("[RL] assault_policy.onnx loaded, RL mode active.");
   } catch (e) {
     _rlLoadState = "error";
-    console.warn("[RL] Failed to load assault_policy.onnx, falling back to rule AI.", e);
+    console.error("[RL] Failed to load model:", e);
   }
 }
 
-// 构建 101 维观测向量，与 rl/env.py _get_obs() 严格对齐
-function _rlBuildObs(attackCd) {
-  const obs = new Float32Array(_RL_OBS_DIM);
-  const ally = state.ally;
-  let idx = 0;
+// LOS 射线步进检测（与 env.py _has_line_of_sight 对齐，steps=16）
+function _rlHasLOS(ax, ay, bx, by) {
+  const steps = 16;
+  for (let i = 1; i < steps; i++) {
+    const t  = i / steps;
+    const px = ax + (bx - ax) * t;
+    const py = ay + (by - ay) * t;
+    for (const o of state.obstacles) {
+      if (px >= o.x && px <= o.x + o.w && py >= o.y && py <= o.y + o.h) return false;
+    }
+  }
+  return true;
+}
 
-  // ── 段1：自身状态 (6维) ─────────────────────────────────────────────────
+// 子弹预测碰撞时间（与 env.py _bullet_time_to_ally 对齐）
+function _rlBulletTTA(b, ally) {
+  const dx  = ally.x - b.x;
+  const dy  = ally.y - b.y;
+  const spd = Math.hypot(b.vx, b.vy);
+  if (spd < 1e-6) return 1.0;
+  const proj = (dx * b.vx + dy * b.vy) / spd;
+  if (proj <= 0) return 1.0;
+  const tta = proj / spd;
+  return Math.min(1.0, Math.max(0.0, tta / 2.2));  // 2.2 = BULLET_TTL
+}
+
+// 构建 121 维观测向量，与 rl/env.py _get_obs() 严格对齐（v2）
+function _rlBuildObs(attackCd) {
+  const obs  = new Float32Array(_RL_OBS_DIM);
+  const ally = state.ally;
+  let idx    = 0;
+
+  // ── 段1：自身状态 (7维) ─────────────────────────────────────────────────
   const nearObsDist = _rlNearestObstacleDist();
   obs[idx++] = ally.x / _RL_CANVAS_W;
   obs[idx++] = ally.y / _RL_CANVAS_H;
@@ -76,22 +109,27 @@ function _rlBuildObs(attackCd) {
   obs[idx++] = nearObsDist / _RL_DIAG;
   obs[idx++] = Math.min(1.0, attackCd / _RL_ASSAULT_INTERVAL);
   obs[idx++] = state.enemies.length / 11.0;
+  obs[idx++] = 1.0 - (ally.hp / ally.maxHp);  // 受伤程度感知
 
-  // ── 段2：主目标敌人（最近）(6维) ────────────────────────────────────────
+  // ── 段2：主目标敌人（最近，8维）──────────────────────────────────────────
   const target = _rlNearestEnemy();
   if (target !== null) {
     const dx   = target.x - ally.x;
     const dy   = target.y - ally.y;
     const dist = Math.hypot(dx, dy);
     const shootCdMax = target.kind === "boss" ? 1.2 : 1.6;
+    const los  = _rlHasLOS(ally.x, ally.y, target.x, target.y);
+    const inRange = (dist > 55 && dist < 110) ? 1.0 : 0.0;
     obs[idx++] = dx / _RL_CANVAS_W;
     obs[idx++] = dy / _RL_CANVAS_H;
     obs[idx++] = dist / _RL_DIAG;
     obs[idx++] = target.hp / target.maxHp;
     obs[idx++] = target.kind === "boss" ? 1.0 : 0.0;
     obs[idx++] = target.shootCd / shootCdMax;
+    obs[idx++] = los ? 1.0 : 0.0;   // LOS 标志
+    obs[idx++] = inRange;            // 有效射程标志
   } else {
-    idx += 6;
+    idx += 8;
   }
 
   // ── 段3：其余最多 4 个敌人 (5维/敌) ────────────────────────────────────
@@ -111,31 +149,29 @@ function _rlBuildObs(attackCd) {
   }
   idx += (_RL_MAX_ENEMIES - 1 - others.length) * 5;
 
-  // ── 段4：最多 8 颗最近敌方子弹 (5维/颗) ────────────────────────────────
+  // ── 段4：最多 8 颗威胁子弹（6维/颗，按 TTA 排序）────────────────────────
   const threatBullets = state.enemyBullets
-    .map(b => ({ b, d: Math.hypot(b.x - ally.x, b.y - ally.y) }))
-    .filter(({ d }) => d < _RL_MAX_BULLET_DIST)
-    .sort((a, b) => a.d - b.d)
+    .filter(b => Math.hypot(b.x - ally.x, b.y - ally.y) < _RL_MAX_BULLET_DIST)
+    .map(b => ({ b, tta: _rlBulletTTA(b, ally) }))
+    .sort((a, b) => a.tta - b.tta)   // TTA 越小越危险，排在前面
     .slice(0, _RL_MAX_BULLETS);
-  for (const { b, d } of threatBullets) {
+  for (const { b, tta } of threatBullets) {
     const dx   = b.x - ally.x;
     const dy   = b.y - ally.y;
+    const dist = Math.hypot(dx, dy);
     const bspd = Math.hypot(b.vx, b.vy) || 1.0;
     obs[idx++] = dx / _RL_CANVAS_W;
     obs[idx++] = dy / _RL_CANVAS_H;
     obs[idx++] = b.vx / bspd;
     obs[idx++] = b.vy / bspd;
-    obs[idx++] = d / _RL_MAX_BULLET_DIST;
+    obs[idx++] = dist / _RL_MAX_BULLET_DIST;
+    obs[idx++] = tta;                 // 预测碰撞时间（0=即将命中）
   }
-  idx += (_RL_MAX_BULLETS - threatBullets.length) * 5;
+  idx += (_RL_MAX_BULLETS - threatBullets.length) * 6;
 
   // ── 段5：障碍物 (6维/块，pad 到 4) ─────────────────────────────────────
   const sortedObs = [...state.obstacles]
-    .map(o => {
-      const cx = o.x + o.w / 2;
-      const cy = o.y + o.h / 2;
-      return { o, d: Math.hypot(cx - ally.x, cy - ally.y) };
-    })
+    .map(o => ({ o, d: Math.hypot((o.x + o.w / 2) - ally.x, (o.y + o.h / 2) - ally.y) }))
     .sort((a, b) => a.d - b.d)
     .slice(0, _RL_MAX_OBSTACLES);
   for (const { o } of sortedObs) {
@@ -143,10 +179,10 @@ function _rlBuildObs(attackCd) {
     const cy = o.y + o.h / 2;
     const dx = cx - ally.x;
     const dy = cy - ally.y;
-    const nearX = Math.max(o.x, Math.min(ally.x, o.x + o.w));
-    const nearY = Math.max(o.y, Math.min(ally.y, o.y + o.h));
+    const nearX    = Math.max(o.x, Math.min(ally.x, o.x + o.w));
+    const nearY    = Math.max(o.y, Math.min(ally.y, o.y + o.h));
     const nearDist = Math.hypot(ally.x - nearX, ally.y - nearY);
-    const cdx = Math.hypot(dx, dy) > 0 ? dx / Math.hypot(dx, dy) : 0;
+    const cdx      = Math.hypot(dx, dy) > 0 ? dx / Math.hypot(dx, dy) : 0;
     obs[idx++] = dx / _RL_CANVAS_W;
     obs[idx++] = dy / _RL_CANVAS_H;
     obs[idx++] = o.w / _RL_CANVAS_W;
@@ -156,14 +192,20 @@ function _rlBuildObs(attackCd) {
   }
   idx += (_RL_MAX_OBSTACLES - sortedObs.length) * 6;
 
-  // ── 段6：到四壁的距离 (4维) ─────────────────────────────────────────────
+  // ── 段6：到四壁距离 (4维) ────────────────────────────────────────────────
   obs[idx++] = ally.y / _RL_CANVAS_H;
   obs[idx++] = (_RL_CANVAS_H - ally.y) / _RL_CANVAS_H;
   obs[idx++] = ally.x / _RL_CANVAS_W;
   obs[idx++] = (_RL_CANVAS_W - ally.x) / _RL_CANVAS_W;
 
-  // ── 段7：攻击冷却比例 (1维) ─────────────────────────────────────────────
-  obs[idx++] = Math.min(1.0, attackCd / _RL_ASSAULT_INTERVAL);
+  // ── 段7：上帧动作 one-hot (9维) ─────────────────────────────────────────
+  obs[idx + _rlPrevAction] = 1.0;
+  idx += _RL_N_ACTIONS;
+
+  // ── 段8：到目标距离变化量 (1维) ─────────────────────────────────────────
+  const distNow   = target ? Math.hypot(target.x - ally.x, target.y - ally.y) : _rlPrevDistToTarget;
+  const distDelta = _rlPrevDistToTarget - distNow;  // >0 靠近
+  obs[idx++] = Math.max(-1.0, Math.min(1.0, distDelta / _RL_CANVAS_W * 10.0));
 
   return obs;
 }
@@ -201,7 +243,15 @@ let _rlInferring  = false;
 function _rlInferAsync(attackCd) {
   if (_rlLoadState !== "ready" || _rlInferring) return;
   _rlInferring = true;
-  const obs = _rlBuildObs(attackCd);
+
+  // 更新帧间距离（供下帧 obs 段8 使用）
+  const target = _rlNearestEnemy();
+  const ally   = state.ally;
+  _rlPrevDistToTarget = target
+    ? Math.hypot(target.x - ally.x, target.y - ally.y)
+    : _rlPrevDistToTarget;
+
+  const obs    = _rlBuildObs(attackCd);
   const tensor = new ort.Tensor("float32", obs, [1, _RL_OBS_DIM]);
   _rlSession.run({ obs: tensor }).then(output => {
     const logits = output.logits.data;  // Float32Array[9]
@@ -209,8 +259,9 @@ function _rlInferAsync(attackCd) {
     for (let i = 1; i < logits.length; i++) {
       if (logits[i] > logits[best]) best = i;
     }
-    _rlLastAction = best;
-    _rlInferring = false;
+    _rlLastAction  = best;
+    _rlPrevAction  = best;   // 更新上帧动作，供下帧 one-hot 使用
+    _rlInferring   = false;
   }).catch(() => { _rlInferring = false; });
 }
 
