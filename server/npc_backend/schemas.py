@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -17,12 +17,4 @@ class ChatAction(BaseModel):
     action_type: str = "dialogue"
     dialogue: str
     emotion: str | None = None
-
-
-class CommandResponse(BaseModel):
-    """指令分类接口的响应体。"""
-    type: Literal["command", "dialogue"]
-    # type=command 时有值
-    stance: str | None = None
-    reply: str | None = None
 

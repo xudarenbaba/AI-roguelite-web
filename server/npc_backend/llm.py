@@ -19,6 +19,18 @@ _STANCE_REPLIES: dict[str, str] = {
     "skirmish": "懂了，我去扫小怪，别让垃圾堆满地图。",
 }
 
+_INTENT_SYSTEM_PROMPT = (
+    "你是战术指令解析器，只输出 JSON，格式二选一：\n"
+    '{"type":"dialogue"}\n'
+    '{"type":"command","stance":"guard|assault|skirmish","reply":"NPC一句确认话"}\n\n'
+    "判断规则：\n"
+    "1. command：玩家明确要求改变 NPC 行动模式，"
+    "如[贴着我/守护/别乱跑]->guard，[上去打/突击/压制]->assault，[先清小怪/游击/减轻压力]->skirmish。\n"
+    "2. dialogue：情绪交流、世界观追问、模糊意图、战斗评论 → 一律 dialogue。\n"
+    "3. reply 要符合嘴臭话痨风格，简短，1句话。\n"
+    "4. 不确定时默认 dialogue，宁可多对话不乱改姿态。"
+)
+
 
 def _client() -> OpenAI:
     cfg = load_config().get("llm", {})
@@ -64,52 +76,36 @@ def classify_intent(
     *,
     message: str,
     scene_info: dict[str, Any],
-    npc_name: str = "烬",
+    npc_name: str,
 ) -> dict[str, Any]:
     """
     判断玩家输入是"普通对话"还是"战术指令"。
 
     返回：
-      - type=dialogue：走完整 LangGraph 对话流程
-      - type=command：直接切换姿态，包含 stance + 确认短句 reply
-
-    stance 枚举：guard（守护）/ assault（进攻）/ skirmish（游击）
+      - {"type": "dialogue"}
+      - {"type": "command", "stance": "guard|assault|skirmish", "reply": "..."}
     """
-    system_prompt = (
-        "你是战术指令解析器，只输出 JSON，格式二选一：\n"
-        '{"type":"dialogue"}\n'
-        '{"type":"command","stance":"guard|assault|skirmish","reply":"NPC一句确认话"}\n\n'
-        "判断规则：\n"
-        "1. command：玩家明确要求改变 NPC 行动模式，"
-        "如[贴着我/守护/别乱跑]->guard，[上去打/突击/压制]->assault，[先清小怪/游击/减轻压力]->skirmish。\n"
-        "2. dialogue：情绪交流、世界观追问、模糊意图、战斗评论 → 一律 dialogue。\n"
-        "3. reply 要符合嘴臭话痨风格，简短，1句话。\n"
-        "4. 不确定时默认 dialogue，宁可多对话不乱改姿态。"
-    )
     user_prompt = (
         f"npc_name={npc_name}\n"
         f"scene_info={json.dumps(scene_info, ensure_ascii=False)}\n"
         f"player_message={message}"
     )
-    cfg = load_config().get("llm", {})
     try:
         raw = chat_completion([
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": _INTENT_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ])
-        # 剥掉 markdown 代码块（部分模型会包裹）
         stripped = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         data: dict[str, Any] = json.loads(stripped)
-        intent_type = str(data.get("type", "")).strip()
-        if intent_type == "command":
+        if str(data.get("type", "")).strip() == "command":
             stance = str(data.get("stance", "")).strip()
             if stance not in VALID_STANCES:
                 raise ValueError(f"invalid stance: {stance}")
             reply = str(data.get("reply", _STANCE_REPLIES.get(stance, "收到。"))).strip()
             return {"type": "command", "stance": stance, "reply": reply}
-        return {"type": "dialogue"}
     except Exception:
-        return {"type": "dialogue"}
+        pass
+    return {"type": "dialogue"}
 
 
 def classify_dialogue_memory(

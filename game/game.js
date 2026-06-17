@@ -796,62 +796,6 @@ function applyStance(stance, reply) {
   appendMessage("npc", bubble);
 }
 
-async function sendDialogue(message) {
-  const payload = {
-    player_id: state.playerId,
-    npc_id:    NPC_ID,
-    npc_name:  NPC_NAME,
-    message,
-    scene_info: buildSceneInfo(),
-  };
-
-  const resp = await fetch(`${NPC_API}/api/chat/stream`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(payload),
-  });
-
-  const reader  = resp.body.getReader();
-  const decoder = new TextDecoder();
-  const msgNode = appendStreamingNpcMessage();
-
-  let accumulated   = "";
-  let buffer        = "";
-  let bubbleThrottle = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop();
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let evt;
-      try { evt = JSON.parse(trimmed); } catch { continue; }
-
-      if (evt.type === "delta") {
-        accumulated += evt.text;
-        msgNode.append(evt.text);
-        const now = Date.now();
-        if (now - bubbleThrottle > 100) { setAllyBubble(accumulated); bubbleThrottle = now; }
-      } else if (evt.type === "done") {
-        const finalText = evt.action?.dialogue || accumulated || "收到，我会继续和你协同。";
-        const emotion   = evt.action?.emotion  || "neutral";
-        msgNode.finish(finalText, emotion);
-        setAllyBubble(`${emotionKaomoji(emotion)} ${finalText}`);
-      } else if (evt.type === "error") {
-        const fallbackText = evt.fallback?.dialogue || "连接中断。我会继续执行上一条指令。";
-        msgNode.finish(fallbackText, "neutral");
-        setAllyBubble(fallbackText);
-      }
-    }
-  }
-}
-
 chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const message = chatInput.value.trim();
@@ -859,17 +803,63 @@ chatForm.addEventListener("submit", async (e) => {
   chatInput.value = "";
   appendMessage("player", message);
 
+  const payload = {
+    player_id:  state.playerId,
+    npc_id:     NPC_ID,
+    npc_name:   NPC_NAME,
+    message,
+    scene_info: buildSceneInfo(),
+  };
+
   try {
-    const cmdResp = await fetch(`${NPC_API}/api/command`, {
+    const resp = await fetch(`${NPC_API}/api/chat/stream`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ message, npc_name: NPC_NAME, scene_info: buildSceneInfo() }),
+      body:    JSON.stringify(payload),
     });
-    const cmdData = await cmdResp.json();
-    if (cmdData.type === "command") {
-      applyStance(cmdData.stance, cmdData.reply);
-    } else {
-      await sendDialogue(message);
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+
+    let msgNode       = null;
+    let accumulated   = "";
+    let buffer        = "";
+    let bubbleThrottle = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let evt;
+        try { evt = JSON.parse(trimmed); } catch { continue; }
+
+        if (evt.type === "command") {
+          applyStance(evt.stance, evt.reply);
+        } else if (evt.type === "delta") {
+          if (!msgNode) msgNode = appendStreamingNpcMessage();
+          accumulated += evt.text;
+          msgNode.append(evt.text);
+          const now = Date.now();
+          if (now - bubbleThrottle > 100) { setAllyBubble(accumulated); bubbleThrottle = now; }
+        } else if (evt.type === "done") {
+          const finalText = evt.action?.dialogue || accumulated || "收到，我会继续和你协同。";
+          const emotion   = evt.action?.emotion  || "neutral";
+          if (msgNode) msgNode.finish(finalText, emotion);
+          setAllyBubble(`${emotionKaomoji(emotion)} ${finalText}`);
+        } else if (evt.type === "error") {
+          const fallbackText = evt.fallback?.dialogue || "连接中断。我会继续执行上一条指令。";
+          if (msgNode) msgNode.finish(fallbackText, "neutral");
+          else appendMessage("npc", fallbackText);
+          setAllyBubble(fallbackText);
+        }
+      }
     }
   } catch (err) {
     const text = "连接中断。我会继续执行上一条指令。";

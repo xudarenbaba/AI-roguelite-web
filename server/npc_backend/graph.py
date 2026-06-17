@@ -4,20 +4,27 @@ import json
 import re
 import threading
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from server.npc_backend.config import load_config
-from server.npc_backend.llm import chat_completion_stream, classify_dialogue_memory
+from server.npc_backend.llm import (
+    chat_completion_stream,
+    classify_dialogue_memory,
+    classify_intent,
+)
+from server.npc_backend.memory import MemoryStore
+from server.npc_backend.prompts import build_messages
+from server.npc_backend.schemas import ChatAction
+from server.npc_backend.short_term import ShortTermMemory
 
 _EMOTION_RE = re.compile(r"<emotion>([\w]+)</emotion>\s*$", re.IGNORECASE)
 _VALID_EMOTIONS = {
     "neutral", "focused", "annoyed", "worried", "happy", "tense", "sarcastic"
 }
-from server.npc_backend.memory import MemoryStore
-from server.npc_backend.prompts import build_messages
-from server.npc_backend.schemas import ChatAction
-from server.npc_backend.short_term import ShortTermMemory
+
+# delta 批量缓冲阈值（字符数）：积累到此长度或收到 LLM 流结束后统一 flush
+_DELTA_BATCH_CHARS = 8
 
 
 class NpcConversationEngine:
@@ -28,13 +35,20 @@ class NpcConversationEngine:
 
     def stream_chat(self, payload: dict[str, Any]) -> Iterator[str]:
         """
-        主流式对话入口，逐行 yield NDJSON 字符串。
+        统一流式入口，逐行 yield NDJSON 字符串。
 
         事件类型：
-          meta  - 开始，携带 npc_id
-          delta - 模型 token 片段
-          done  - 完整结束，携带最终 ChatAction
-          error - 出错，携带 fallback
+          meta    - 立即返回，携带 npc_id
+          command - 战术指令，携带 stance + reply，前端切换姿态后结束
+          delta   - 对话 token 批次（积累 _DELTA_BATCH_CHARS 字符后 flush）
+          done    - 对话完整结束，携带最终 ChatAction
+          error   - 出错，携带 fallback
+
+        并行优化：收到请求后立即同时启动：
+          - 意图分类 LLM（非流式）
+          - 短期记忆 + 长期记忆检索
+        若分类结果为 command，直接 yield command 事件，记忆检索结果丢弃。
+        若分类结果为 dialogue，记忆检索结果（大概率已完成）直接用于构建 prompt。
         """
         player_id: str = payload.get("player_id", "")
         npc_id: str = payload.get("npc_id", "")
@@ -47,22 +61,34 @@ class NpcConversationEngine:
         try:
             query = f"scene={scene_info}\nmessage={message}"
 
-            # 并行加载短期记忆和长期记忆上下文
-            short_term_history: list[dict[str, Any]] = []
-            long_term_ctx: dict[str, list[str]] = {}
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                fut_short = executor.submit(
+            # 同时并行启动：意图分类 + 短期记忆 + 长期记忆检索（共3个任务）
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                fut_intent: Future[dict[str, Any]] = executor.submit(
+                    classify_intent,
+                    message=message,
+                    scene_info=scene_info,
+                    npc_name=npc_name,
+                )
+                fut_short: Future[list[dict[str, Any]]] = executor.submit(
                     self._short_term.get_recent, player_id, npc_id
                 )
-                fut_long = executor.submit(
+                fut_long: Future[dict[str, list[str]]] = executor.submit(
                     self._memory.search_context, query, player_id, npc_id
                 )
-                for fut in as_completed([fut_short, fut_long]):
-                    if fut is fut_short:
-                        short_term_history = fut.result()
-                    else:
-                        long_term_ctx = fut.result()
+
+                # 意图分类优先等待，它决定后续走哪条路
+                intent = fut_intent.result()
+
+            if intent["type"] == "command":
+                yield _event("command", {
+                    "stance": intent["stance"],
+                    "reply":  intent["reply"],
+                })
+                return
+
+            # dialogue 分支：记忆结果此时已完成或即将完成
+            short_term_history: list[dict[str, Any]] = fut_short.result()
+            long_term_ctx: dict[str, list[str]] = fut_long.result()
 
             messages = build_messages(
                 npc_name=npc_name,
@@ -71,20 +97,26 @@ class NpcConversationEngine:
                 world_chunks=long_term_ctx.get("world_chunks", []),
                 persona_chunks=long_term_ctx.get("persona_chunks", []),
                 dialogue_daily_chunks=long_term_ctx.get("dialogue_daily_chunks", []),
-                dialogue_important_chunks=long_term_ctx.get(
-                    "dialogue_important_chunks", []
-                ),
+                dialogue_important_chunks=long_term_ctx.get("dialogue_important_chunks", []),
                 short_term_history=short_term_history,
             )
 
             full_reply_parts: list[str] = []
+            batch: list[str] = []
+
             for delta in chat_completion_stream(messages):
                 full_reply_parts.append(delta)
-                yield _event("delta", {"text": delta})
+                batch.append(delta)
+                if sum(len(s) for s in batch) >= _DELTA_BATCH_CHARS:
+                    yield _event("delta", {"text": "".join(batch)})
+                    batch = []
+
+            if batch:
+                yield _event("delta", {"text": "".join(batch)})
 
             raw_reply = "".join(full_reply_parts).strip()
 
-            # 从回复末尾提取 <emotion>xxx</emotion> 标签
+            # 从回复末尾提取 <emotion>xxx</emotion>
             emotion = "neutral"
             m = _EMOTION_RE.search(raw_reply)
             if m:
@@ -94,10 +126,7 @@ class NpcConversationEngine:
 
             full_reply = raw_reply or "收到，我会继续和你协同。"
 
-            action = ChatAction(
-                action_type="dialogue", dialogue=full_reply, emotion=emotion
-            )
-            # 先发 done，让前端立刻固定文本和情绪
+            action = ChatAction(action_type="dialogue", dialogue=full_reply, emotion=emotion)
             yield _event("done", {"action": action.model_dump(exclude_none=True)})
 
             # 后台异步写记忆，不阻塞流式响应
@@ -138,13 +167,10 @@ class NpcConversationEngine:
                 dialogue="本地 NPC 服务暂时繁忙，我会继续跟随你行动。",
                 emotion="neutral",
             )
-            yield _event(
-                "error",
-                {
-                    "message": str(exc),
-                    "fallback": fallback.model_dump(exclude_none=True),
-                },
-            )
+            yield _event("error", {
+                "message": str(exc),
+                "fallback": fallback.model_dump(exclude_none=True),
+            })
 
 
 def _event(event_type: str, data: dict[str, Any]) -> str:

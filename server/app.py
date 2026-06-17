@@ -8,8 +8,7 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
 
 from server.npc_backend.graph import NpcConversationEngine
-from server.npc_backend.llm import classify_intent
-from server.npc_backend.schemas import ChatRequest, CommandResponse
+from server.npc_backend.schemas import ChatRequest
 
 
 def create_app() -> Flask:
@@ -58,35 +57,6 @@ def create_app() -> Flask:
             stream_with_context(engine.stream_chat(payload)),
             mimetype="application/x-ndjson",
         )
-
-    @app.post("/api/command")
-    def api_command() -> tuple[Any, int]:
-        """
-        轻量意图分类接口：判断玩家输入是战术指令还是普通对话。
-        指令时返回 stance + NPC 确认短句；对话时返回 type=dialogue。
-        """
-        body = request.get_json(force=True, silent=True) or {}
-        message   = str(body.get("message",  "")).strip()
-        npc_name  = str(body.get("npc_name", "")).strip() or None
-        scene_info = body.get("scene_info") or {}
-
-        if not message:
-            return jsonify({"error": "message is required"}), 400
-
-        try:
-            result = classify_intent(
-                message=message,
-                scene_info=scene_info,
-                npc_name=npc_name or "烬",
-            )
-            resp = CommandResponse(
-                type=result["type"],
-                stance=result.get("stance"),
-                reply=result.get("reply"),
-            )
-            return jsonify(resp.model_dump(exclude_none=True)), 200
-        except Exception as e:  # noqa: BLE001
-            return jsonify({"type": "dialogue", "error": str(e)}), 200
 
     return app
 
