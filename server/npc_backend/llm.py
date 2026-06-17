@@ -10,22 +10,21 @@ from server.npc_backend.config import load_config
 from server.npc_backend.prompts import build_memory_classify_messages
 
 # 支持的姿态集合（前端 game.js 中的 state.ally.stance 枚举值）
-VALID_STANCES = {"guard", "assault", "skirmish"}
+VALID_STANCES = {"guard", "assault"}
 
 # 姿态 → NPC 确认短句（符合话痨嘴臭人设）
 _STANCE_REPLIES: dict[str, str] = {
-    "guard": "行，收拢了，你别乱跑，我贴着你。",
+    "guard":  "行，收拢了，你别乱跑，我贴着你。",
     "assault": "好嘞，我去前面撕，你别拖后腿。",
-    "skirmish": "懂了，我去扫小怪，别让垃圾堆满地图。",
 }
 
 _INTENT_SYSTEM_PROMPT = (
     "你是战术指令解析器，只输出 JSON，格式二选一：\n"
     '{"type":"dialogue"}\n'
-    '{"type":"command","stance":"guard|assault|skirmish","reply":"NPC一句确认话"}\n\n'
+    '{"type":"command","stance":"guard|assault","reply":"NPC一句确认话"}\n\n'
     "判断规则：\n"
     "1. command：玩家明确要求改变 NPC 行动模式，"
-    "如[贴着我/守护/别乱跑]->guard，[上去打/突击/压制]->assault，[先清小怪/游击/减轻压力]->skirmish。\n"
+    "如[贴着我/守护/别乱跑/回来]->guard，[上去打/突击/压制/冲]->assault。\n"
     "2. dialogue：情绪交流、世界观追问、模糊意图、战斗评论 → 一律 dialogue。\n"
     "3. reply 要符合嘴臭话痨风格，简短，1句话。\n"
     "4. 不确定时默认 dialogue，宁可多对话不乱改姿态。"

@@ -26,7 +26,7 @@ const _RL_CANVAS_H        = 540.0;
 const _RL_DIAG            = Math.hypot(_RL_CANVAS_W, _RL_CANVAS_H);  // ~1051
 const _RL_MAX_ENEMIES     = 5;
 const _RL_MAX_BULLETS     = 8;
-const _RL_MAX_OBSTACLES   = 4;
+const _RL_MAX_OBSTACLES   = 7;  // 新布局最多 7 个障碍物
 const _RL_MAX_BULLET_DIST = 200.0;
 const _RL_ASSAULT_INTERVAL = 0.45;
 const _RL_N_ACTIONS       = 9;
@@ -35,11 +35,11 @@ const _RL_SEG1 = 7;
 const _RL_SEG2 = 8;
 const _RL_SEG3 = (_RL_MAX_ENEMIES - 1) * 5;   // 20
 const _RL_SEG4 = _RL_MAX_BULLETS * 6;          // 48
-const _RL_SEG5 = _RL_MAX_OBSTACLES * 6;        // 24
+const _RL_SEG5 = _RL_MAX_OBSTACLES * 6;        // 42
 const _RL_SEG6 = 4;
 const _RL_SEG7 = _RL_N_ACTIONS;               // 9
 const _RL_SEG8 = 1;
-const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8; // 121
+const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8; // 139
 
 // 帧间状态：上帧动作（用于 one-hot 和平滑惩罚参考）、上帧到目标距离
 let _rlPrevAction = 0;
@@ -374,25 +374,42 @@ function spawnEnemies() {
 // ── 障碍物 ────────────────────────────────────────────────────────────────────
 
 const OBSTACLE_LAYOUTS = [
-  // 布局 0：中央掩体 + 两侧掩护
+  // 布局 0：中央横墙 + 两侧竖柱 + 斜角掩体
   [
-    { x: 410, y: 220, w: 100, h: 100 },
-    { x: 270, y: 160, w: 70,  h: 40  },
-    { x: 620, y: 320, w: 70,  h: 40  },
+    { x: 360, y: 255, w: 180, h: 22 },  // 中央横向长条
+    { x: 240, y: 170, w: 22,  h: 130 }, // 左侧竖柱
+    { x: 660, y: 220, w: 22,  h: 130 }, // 右侧竖柱
+    { x: 480, y: 140, w: 140, h: 20 },  // 上方横条
+    { x: 420, y: 360, w: 140, h: 20 },  // 下方横条
+    { x: 300, y: 360, w: 80,  h: 20 },  // 左下短横
   ],
-  // 布局 1：上下横墙 + 左右侧墙
+  // 布局 1：走廊型（上下各一道长墙，中间留缺口）
   [
-    { x: 370, y: 140, w: 90, h: 50 },
-    { x: 370, y: 350, w: 90, h: 50 },
-    { x: 265, y: 235, w: 55, h: 70 },
-    { x: 640, y: 235, w: 55, h: 70 },
+    { x: 280, y: 145, w: 200, h: 20 },  // 上横墙左段
+    { x: 560, y: 145, w: 160, h: 20 },  // 上横墙右段
+    { x: 280, y: 375, w: 160, h: 20 },  // 下横墙左段
+    { x: 520, y: 375, w: 200, h: 20 },  // 下横墙右段
+    { x: 235, y: 220, w: 20,  h: 110 }, // 左竖柱
+    { x: 660, y: 210, w: 20,  h: 110 }, // 右竖柱
+    { x: 410, y: 245, w: 100, h: 20 },  // 中央横短条
   ],
-  // 布局 2：菱形分散掩体
+  // 布局 2：分散长条（斜向交错）
   [
-    { x: 290, y: 155, w: 85, h: 45 },
-    { x: 540, y: 195, w: 85, h: 45 },
-    { x: 290, y: 340, w: 85, h: 45 },
-    { x: 540, y: 310, w: 85, h: 45 },
+    { x: 270, y: 160, w: 160, h: 20 },  // 左上横条
+    { x: 580, y: 200, w: 20,  h: 150 }, // 右侧竖条
+    { x: 340, y: 340, w: 160, h: 20 },  // 左下横条
+    { x: 630, y: 330, w: 140, h: 20 },  // 右下横条
+    { x: 240, y: 280, w: 20,  h: 100 }, // 左竖柱
+    { x: 450, y: 150, w: 20,  h: 120 }, // 中竖柱
+  ],
+  // 布局 3：十字形 + 外围长条
+  [
+    { x: 390, y: 230, w: 120, h: 20 },  // 横臂
+    { x: 445, y: 165, w: 20,  h: 140 }, // 竖臂
+    { x: 240, y: 155, w: 130, h: 20 },  // 左上横
+    { x: 620, y: 155, w: 130, h: 20 },  // 右上横
+    { x: 240, y: 365, w: 130, h: 20 },  // 左下横
+    { x: 620, y: 365, w: 130, h: 20 },  // 右下横
   ],
 ];
 
@@ -584,30 +601,8 @@ function allyConfig() {
   if (state.ally.stance === "assault") {
     return { attackRange: 110, kiteRange: 55, interval: 0.45, speedMul: 1.2, damage: 13, strafeAmp: 0.3 };
   }
-  if (state.ally.stance === "guard") {
-    return { attackRange: 0, kiteRange: 0, interval: 0.75, speedMul: 1.0, damage: 10, strafeAmp: 0 };
-  }
-  return { attackRange: 150, kiteRange: 90, interval: 0.55, speedMul: 1.3, damage: 11, strafeAmp: 1.0 };
-}
-
-function findWeakestEnemy() {
-  const mobs = state.enemies.filter((e) => e.kind === "mob" && e.hp > 0);
-  if (mobs.length > 0) return mobs.reduce((a, b) => (a.hp <= b.hp ? a : b));
-  return findNearestEnemy(state.ally)[0];
-}
-
-function calcDodgeVector() {
-  let ox = 0; let oy = 0;
-  state.enemyBullets.forEach((b) => {
-    const d = distance(b, state.ally);
-    if (d < 90) {
-      const len = Math.hypot(b.vx, b.vy) || 1;
-      ox += -b.vy / len / Math.max(1, d * 0.04);
-      oy +=  b.vx / len / Math.max(1, d * 0.04);
-    }
-  });
-  const mag = Math.hypot(ox, oy);
-  return mag > 0.01 ? [ox / mag, oy / mag] : [0, 0];
+  // guard（默认）
+  return { attackRange: 0, kiteRange: 0, interval: 0.75, speedMul: 1.0, damage: 10, strafeAmp: 0 };
 }
 
 function strafeVector(from, target) {
@@ -668,30 +663,6 @@ function updateAlly(dt) {
       }
     }
 
-  } else {
-    const target = findWeakestEnemy();
-    if (target) {
-      const d = distance(state.ally, target);
-      let mx = 0; let my = 0;
-      if (d > cfg.attackRange) {
-        const [nx, ny] = normalize(target.x - state.ally.x, target.y - state.ally.y);
-        mx += nx; my += ny;
-      } else if (d < cfg.kiteRange) {
-        const [nx, ny] = normalize(state.ally.x - target.x, state.ally.y - target.y);
-        mx += nx * 1.2; my += ny * 1.2;
-      } else {
-        const [sx, sy] = strafeVector(state.ally, target);
-        mx += sx * cfg.strafeAmp; my += sy * cfg.strafeAmp;
-      }
-      const [dodgeX, dodgeY] = calcDodgeVector();
-      mx += dodgeX * 0.7; my += dodgeY * 0.7;
-      const [fnx, fny] = normalize(mx, my);
-      moveWithCollision(state.ally, fnx * speed * dt, fny * speed * dt);
-      if (state.ally.attackCd <= 0) {
-        state.allyBullets.push(createBullet("ally", state.ally, target, 380, cfg.damage));
-        state.ally.attackCd = cfg.interval;
-      }
-    }
   }
 
   // 边界夹紧
@@ -1010,7 +981,7 @@ function render(dt) {
 }
 
 function updateHud() {
-  const stanceLabel = { assault: "突击", guard: "守护", skirmish: "游击" }[state.ally.stance] || state.ally.stance;
+  const stanceLabel = STANCE_LABELS[state.ally.stance] || state.ally.stance;
   const floorName = FLOOR_META[(state.floor - 1) % FLOOR_META.length].name;
 
   // assault 姿态时显示 RL 模型加载状态
@@ -1061,7 +1032,7 @@ document.addEventListener("keyup", (e) => { state.keys[e.code] = false; });
 const NPC_ID   = "wuxiao_01";
 const NPC_NAME = "乌枭";
 const NPC_DISPLAY_NAME = "乌枭";
-const STANCE_LABELS = { assault: "突击", guard: "守护", skirmish: "游击" };
+const STANCE_LABELS = { assault: "突击", guard: "守护" };
 
 function buildSceneInfo() {
   return {
