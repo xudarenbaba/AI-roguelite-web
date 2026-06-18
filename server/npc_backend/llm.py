@@ -107,6 +107,27 @@ def classify_intent(
     return {"type": "dialogue"}
 
 
+def generate_no_hp_reply(*, npc_name: str) -> str:
+    """
+    NPC 灵核失稳（hp=0）时被要求突击，生成一句符合人设的拒绝回复。
+    使用轻量单次调用，不走记忆检索。
+    失败时返回硬编码兜底文本。
+    """
+    system_prompt = (
+        f"你是 NPC「{npc_name}」，嘴臭话痨，但此刻灵核失稳、无法战斗。"
+        "玩家要求你去突击，你需要用一句话拒绝，语气可以无奈、嘴硬或自嘲，"
+        "符合话痨人设，不超过20字，不要解释原因只说无法执行。只输出这一句话，不加引号。"
+    )
+    try:
+        reply = chat_completion([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "玩家让你去突击。"},
+        ]).strip()
+        return reply or "灵核失稳了，冲不动，别催。"
+    except Exception:  # noqa: BLE001
+        return "灵核失稳了，冲不动，别催。"
+
+
 def classify_dialogue_memory(
     *,
     player_message: str,

@@ -12,6 +12,7 @@ from server.npc_backend.llm import (
     chat_completion_stream,
     classify_dialogue_memory,
     classify_intent,
+    generate_no_hp_reply,
 )
 from server.npc_backend.memory import MemoryStore
 from server.npc_backend.prompts import build_messages
@@ -80,8 +81,18 @@ class NpcConversationEngine:
                 intent = fut_intent.result()
 
             if intent["type"] == "command":
+                stance = intent["stance"]
+                ally_hp = int(scene_info.get("ally_hp", 100))
+                # NPC 无血时拒绝突击指令，改为对话回复
+                if stance == "assault" and ally_hp <= 0:
+                    refusal = generate_no_hp_reply(npc_name=npc_name)
+                    action = ChatAction(
+                        action_type="dialogue", dialogue=refusal, emotion="annoyed"
+                    )
+                    yield _event("done", {"action": action.model_dump(exclude_none=True)})
+                    return
                 yield _event("command", {
-                    "stance": intent["stance"],
+                    "stance": stance,
                     "reply":  intent["reply"],
                 })
                 return

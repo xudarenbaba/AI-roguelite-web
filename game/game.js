@@ -31,7 +31,7 @@ const _RL_MAX_BULLET_DIST = 200.0;
 const _RL_ASSAULT_INTERVAL = 0.45;
 const _RL_N_ACTIONS       = 9;
 // 段长与 env.py 严格对齐
-const _RL_SEG1 = 7;
+const _RL_SEG1 = 4;   // 只保留 x, y, 攻击冷却, 敌人数量；去掉 hp 和障碍物距离
 const _RL_SEG2 = 8;
 const _RL_SEG3 = (_RL_MAX_ENEMIES - 1) * 5;   // 20
 const _RL_SEG4 = _RL_MAX_BULLETS * 6;          // 48
@@ -39,7 +39,8 @@ const _RL_SEG5 = _RL_MAX_OBSTACLES * 6;        // 42
 const _RL_SEG6 = 4;
 const _RL_SEG7 = _RL_N_ACTIONS;               // 9
 const _RL_SEG8 = 1;
-const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8; // 139
+const _RL_SEG9 = 1;   // 最危险子弹 TTA
+const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8 + _RL_SEG9; // 137
 
 // 帧间状态：上帧动作（用于 one-hot 和平滑惩罚参考）、上帧到目标距离
 let _rlPrevAction = 0;
@@ -101,15 +102,13 @@ function _rlBuildObs(attackCd) {
   const ally = state.ally;
   let idx    = 0;
 
-  // ── 段1：自身状态 (7维) ─────────────────────────────────────────────────
-  const nearObsDist = _rlNearestObstacleDist();
+  // ── 段1：自身状态 (4维) ─────────────────────────────────────────────────
+  // 去掉 hp 和障碍物距离：障碍物距离会让 agent 隐式学到"远离障碍物=安全"，
+  // 导致不敢进入地图中间区域；障碍物位置信息段5里已有完整描述
   obs[idx++] = ally.x / _RL_CANVAS_W;
   obs[idx++] = ally.y / _RL_CANVAS_H;
-  obs[idx++] = ally.hp / ally.maxHp;
-  obs[idx++] = nearObsDist / _RL_DIAG;
   obs[idx++] = Math.min(1.0, attackCd / _RL_ASSAULT_INTERVAL);
   obs[idx++] = state.enemies.length / 11.0;
-  obs[idx++] = 1.0 - (ally.hp / ally.maxHp);  // 受伤程度感知
 
   // ── 段2：主目标敌人（最近，8维）──────────────────────────────────────────
   const target = _rlNearestEnemy();
@@ -207,18 +206,34 @@ function _rlBuildObs(attackCd) {
   const distDelta = _rlPrevDistToTarget - distNow;  // >0 靠近
   obs[idx++] = Math.max(-1.0, Math.min(1.0, distDelta / _RL_CANVAS_W * 10.0));
 
+  // ── 段9：最危险子弹 TTA (1维) ────────────────────────────────────────────
+  // 所有威胁子弹中 TTA 最小值，0=即将命中，1=无威胁
+  let minTTA = 1.0;
+  for (const b of state.enemyBullets) {
+    if (Math.hypot(b.x - ally.x, b.y - ally.y) < _RL_MAX_BULLET_DIST) {
+      const tta = _rlBulletTTA(b, ally);
+      if (tta < minTTA) minTTA = tta;
+    }
+  }
+  obs[idx++] = minTTA;
+
   return obs;
 }
 
 function _rlNearestEnemy() {
+  // LOS 加权评分，与 rl/env.py _nearest_enemy 严格对齐
+  // 评分 = 距离 × (LOS通畅 ? 1.0 : 1.8)，优先选有视线且近的敌人
   if (state.enemies.length === 0) return null;
-  let nearest = null;
-  let minD = Infinity;
+  const ally = state.ally;
+  let best = null;
+  let bestScore = Infinity;
   for (const e of state.enemies) {
-    const d = Math.hypot(e.x - state.ally.x, e.y - state.ally.y);
-    if (d < minD) { minD = d; nearest = e; }
+    const d     = Math.hypot(e.x - ally.x, e.y - ally.y);
+    const los   = _rlHasLOS(ally.x, ally.y, e.x, e.y);
+    const score = d * (los ? 1.0 : 1.8);
+    if (score < bestScore) { bestScore = score; best = e; }
   }
-  return nearest;
+  return best;
 }
 
 function _rlNearestObstacleDist() {
@@ -307,6 +322,7 @@ const state = {
     stance: "guard",
     bubble: "",
     bubbleUntil: 0,
+    dead: false,   // 死亡 flag，防止 checkDefeat 每帧重置气泡
   },
   enemies: [],
   playerBullets: [],
@@ -469,6 +485,7 @@ function nextFloor() {
   state.ally.x = 220;   state.ally.y = 290;
   state.player.hp = Math.min(state.player.maxHp, state.player.hp + 40);
   state.ally.hp   = Math.min(state.ally.maxHp,   state.ally.hp   + 40);
+  state.ally.dead = false;   // 进入下一层时复活
   generateObstacles();
   spawnEnemies();
   const meta = FLOOR_META[(state.floor - 1) % FLOOR_META.length];
@@ -772,9 +789,12 @@ function checkDefeat() {
     state.result = `战败。坚持到了第 ${state.floor} 层。`;
     setAllyBubble("这次没守住，下轮我们换打法。");
   }
-  if (state.ally.hp <= 0) {
-    state.ally.hp = 0;
+  if (state.ally.hp <= 0 && !state.ally.dead) {
+    state.ally.hp    = 0;
+    state.ally.dead  = true;
+    state.ally.stance = "guard";   // 自动切回守护
     setAllyBubble("灵核失稳...你先继续前进。");
+    // 气泡只设一次（3秒），后续不再重置
   }
 }
 
@@ -1058,6 +1078,8 @@ function buildSceneInfo() {
 
 function applyStance(stance, reply) {
   if (!stance) return;
+  // 客户端保底：NPC 无血时不允许切突击（正常情况由后端拦截并给出回复）
+  if (stance === "assault" && state.ally.dead) return;
   state.ally.stance = stance;
   const label  = STANCE_LABELS[stance] || stance;
   const bubble = reply || `姿态切换：${label}。`;
