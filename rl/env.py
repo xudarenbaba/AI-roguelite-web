@@ -31,7 +31,7 @@ ALLY_MAX_HP: float = 160.0
 ALLY_BASE_SPEED: float = 200.0
 
 ASSAULT_ATTACK_RANGE: float = 110.0
-ASSAULT_KITE_RANGE: float   = 55.0
+ASSAULT_KITE_RANGE: float   = 65.0   # 从 55 调整到 65，保证 ally 与敌人的视觉间距
 ASSAULT_INTERVAL: float     = 0.45
 ASSAULT_SPEED_MUL: float    = 1.2
 ASSAULT_DAMAGE: float       = 13.0
@@ -307,9 +307,10 @@ class AssaultEnv(gym.Env):
         self._floor: int = 1
         self._hp_mul: float = 1.0
         self._speed_mul: float = 1.0
-        # v2 新增：用于平滑惩罚和距离塑形
         self._prev_action: int = 0
         self._prev_dist_to_target: float = 0.0
+        self._prev_ally_pos: tuple[float, float] = (0.0, 0.0)
+        self._still_frames: int = 0        # 连续静止帧计数（方案四）
 
     # ── 公开接口 ──────────────────────────────────────────────────────────────
 
@@ -338,9 +339,9 @@ class AssaultEnv(gym.Env):
         self._enemies = []
         for i in range(mob_count):
             bx, by = MOB_BASE_POSITIONS[i % len(MOB_BASE_POSITIONS)]
+            ex, ey = self._safe_spawn(bx, by, MOB_RADIUS, fallback_x=750.0, fallback_y=270.0)
             self._enemies.append(Enemy(
-                x=bx + random.uniform(-20, 20),
-                y=by + random.uniform(-20, 20),
+                x=ex, y=ey,
                 radius=MOB_RADIUS,
                 hp=round(MOB_BASE_HP * self._hp_mul),
                 max_hp=round(MOB_BASE_HP * self._hp_mul),
@@ -348,8 +349,9 @@ class AssaultEnv(gym.Env):
                 kind="mob",
                 shoot_cd=random.uniform(MOB_SHOOT_CD_MIN, MOB_SHOOT_CD_MAX),
             ))
+        bx, by = self._safe_spawn(820.0, 270.0, BOSS_RADIUS, fallback_x=830.0, fallback_y=400.0)
         self._enemies.append(Enemy(
-            x=820.0, y=270.0,
+            x=bx, y=by,
             radius=BOSS_RADIUS,
             hp=round(BOSS_BASE_HP * self._hp_mul),
             max_hp=round(BOSS_BASE_HP * self._hp_mul),
@@ -363,6 +365,8 @@ class AssaultEnv(gym.Env):
         self._attack_cd     = 0.0
         self._step_count    = 0
         self._prev_action   = 0
+        self._still_frames  = 0
+        self._prev_ally_pos = (self._ally.x, self._ally.y)
 
         target = self._nearest_enemy()
         self._prev_dist_to_target = self._ally.dist(target) if target else 0.0
@@ -438,11 +442,22 @@ class AssaultEnv(gym.Env):
         reward = self._compute_reward(
             damage_dealt, hp_lost, target_now,
             action, dist_now, dist_delta, fired_without_los,
+            self._still_frames,
         )
 
         # 9. 更新帧间状态
-        self._prev_action          = action
-        self._prev_dist_to_target  = dist_now
+        # 静止检测：位移 < 0.5px 视为静止
+        moved = math.hypot(
+            self._ally.x - self._prev_ally_pos[0],
+            self._ally.y - self._prev_ally_pos[1],
+        )
+        if moved < 0.5:
+            self._still_frames += 1
+        else:
+            self._still_frames = 0
+        self._prev_ally_pos       = (self._ally.x, self._ally.y)
+        self._prev_action         = action
+        self._prev_dist_to_target = dist_now
 
         terminated = self._ally.hp <= 0 or len(self._enemies) == 0
         truncated  = self._step_count >= MAX_STEPS
@@ -606,69 +621,71 @@ class AssaultEnv(gym.Env):
         target: Enemy | None,
         action: int,
         dist_now: float,
-        dist_delta: float,       # >0 靠近，<0 远离
+        dist_delta: float,
         fired_without_los: bool,
+        still_frames: int,
     ) -> float:
         """
-        v3 奖励函数设计：
+        v4 奖励函数：
 
-        1. 伤害奖励        核心正奖励
-        2. 受伤惩罚        权重高于伤害，迫使躲避
-        3. 接近塑形        dist_delta > 0 时持续给小正奖励（势能函数）
+        1. 伤害奖励
+        2. 受伤惩罚
+        3. 势能场接近奖励（方案一）：用距离本身持续惩罚，绕路时不受干扰
         4. 距离+LOS 联合区间奖励
-           - 射程内且 LOS 通畅：最大正奖励（"有效攻击位"）
-           - 射程内但 LOS 遮挡：无正奖励 + 每帧持续惩罚（核心改动）
-           - 稍远且 LOS 通畅：小正奖励
-           - 过远：随距离加重惩罚
-           - 过近：轻微惩罚
-        5. 动作平滑惩罚    与上帧方向相反时惩罚（抑制抽搐）
-        6. LOS 遮挡开火惩罚  仅开火事件（辅助信号）
-        7. 死亡惩罚
-        8. 胜利奖励
-        9. 时间惩罚
+           - 过近（<kiteRange）：加重惩罚（方案C）
+           - 射程内 LOS 通畅：最高正奖励
+           - 射程内 LOS 遮挡：持续帧惩罚
+           - 稍远（110~120px）LOS 通畅：小正奖励
+           - 过远（>120px，方案三）：随距离加重惩罚
+        5. 动作平滑惩罚
+        6. LOS 遮挡开火惩罚
+        7. 连续静止惩罚（方案四）：>45 帧起累积加重
+        8. 死亡惩罚
+        9. 胜利奖励
+        10. 时间惩罚
         """
+        DIAG  = math.hypot(CANVAS_W, CANVAS_H)
         reward = 0.0
         ally   = self._ally
 
-        # 1. 伤害奖励（mob 一发 +1.04）
+        # 1. 伤害奖励
         reward += damage_dealt * 0.08
 
         # 2. 受伤惩罚
         reward -= hp_lost * 0.12
 
-        # 3. 接近塑形
-        reward += dist_delta * 0.003
+        # 3. 势能场接近奖励（方案一）
+        # 用当前距离本身做持续惩罚，不依赖 delta，绕路时仍有稳定的"靠近"引力
+        # 距离 500px → -0.007/帧；距离 100px → -0.0014/帧
+        if target is not None:
+            reward -= (dist_now / DIAG) * 0.015
 
         # 4. 距离 + LOS 联合区间奖励
         if target is not None:
-            # 每帧计算一次 LOS（已在 obs 里算过，这里再算一次，cost 极低）
             los = _has_line_of_sight(
                 ally.x, ally.y, target.x, target.y, self._obstacles
             )
 
             if dist_now < ASSAULT_KITE_RANGE:
-                # 过近：轻微惩罚，与 LOS 无关
-                reward -= 0.004
+                # 过近：加重惩罚（方案C，从 -0.004 → -0.012）
+                reward -= 0.012
 
             elif ASSAULT_KITE_RANGE <= dist_now < ASSAULT_ATTACK_RANGE:
-                # 有效射程内
                 if los:
-                    # LOS 通畅 + 射程内 = 最优"有效攻击位"，给最高持续正奖励
-                    reward += 0.010
+                    reward += 0.010   # 最优攻击位
                 else:
-                    # LOS 遮挡 + 射程内 = 无效站桩，每帧持续惩罚
-                    # 这是核心改动：让 agent 感受到"在遮挡位置等于每帧亏钱"
-                    reward -= 0.008
+                    reward -= 0.008   # LOS 遮挡 = 每帧亏钱
 
-            elif ASSAULT_ATTACK_RANGE <= dist_now < 150.0:
-                # 稍远区间：LOS 通畅给小正奖励，遮挡不给
+            elif ASSAULT_ATTACK_RANGE <= dist_now < 120.0:
+                # 方案三：阈值从 150 收紧到 120
                 if los:
                     reward += 0.003
+                # LOS 遮挡时不给正奖励（保持中性）
 
             else:
-                # 过远（>150px）：随距离加重惩罚，与 LOS 无关
-                excess = (dist_now - 150.0) / CANVAS_W
-                reward -= 0.008 + excess * 0.02
+                # 过远（>120px），方案三：惩罚系数从 0.02 → 0.04
+                excess = (dist_now - 120.0) / CANVAS_W
+                reward -= 0.008 + excess * 0.04
 
         # 5. 动作平滑惩罚
         prev_vec = ACTION_VECTORS[self._prev_action]
@@ -677,24 +694,50 @@ class AssaultEnv(gym.Env):
         if action != 0 and self._prev_action != 0 and dot < -0.5:
             reward -= 0.005
 
-        # 6. LOS 遮挡开火惩罚（辅助信号，配合第4条的帧惩罚共同作用）
+        # 6. LOS 遮挡开火惩罚
         if fired_without_los:
             reward -= 0.04
 
-        # 7. 死亡大惩罚
+        # 7. 连续静止惩罚（方案四）
+        # 连续 45 帧（0.75s）不动开始惩罚，每帧 -0.008，随时间线性加重到 -0.020
+        if still_frames > 45:
+            # 超出 45 帧后每帧从 -0.008 线性增大，最高 -0.020
+            overage = min(still_frames - 45, 75)   # 最多再加 75 帧的加重量
+            penalty = 0.008 + overage * (0.012 / 75)
+            reward -= penalty
+
+        # 8. 死亡惩罚
         if ally.hp <= 0:
             reward -= 30.0
 
-        # 8. 胜利奖励
+        # 9. 胜利奖励
         if len(self._enemies) == 0:
             reward += 50.0
 
-        # 9. 时间效率惩罚
+        # 10. 时间惩罚
         reward -= 0.001
 
         return float(reward)
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────────
+
+    def _safe_spawn(self, base_x: float, base_y: float,
+                    radius: float,
+                    fallback_x: float, fallback_y: float,
+                    max_tries: int = 20,
+                    jitter: float = 20.0) -> tuple[float, float]:
+        """
+        在 base 附近随机采样一个不与障碍物碰撞的坐标。
+        最多尝试 max_tries 次，失败后返回 fallback 坐标。
+        """
+        for _ in range(max_tries):
+            x = base_x + random.uniform(-jitter, jitter)
+            y = base_y + random.uniform(-jitter, jitter)
+            x = max(radius, min(x, CANVAS_W - radius))
+            y = max(radius, min(y, CANVAS_H - radius))
+            if not _collides_with_obstacle(x, y, radius, self._obstacles):
+                return x, y
+        return fallback_x, fallback_y
 
     def _nearest_enemy(self) -> Enemy | None:
         if not self._enemies:

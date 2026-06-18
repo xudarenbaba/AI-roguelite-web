@@ -341,15 +341,25 @@ const MOB_BASE_POSITIONS = [
   { x: 850, y: 130 },
 ];
 
+// 在障碍物附近随机采样安全出生点，与 rl/env.py _safe_spawn 逻辑对齐
+function safeSpawnPos(baseX, baseY, radius, fallbackX, fallbackY) {
+  for (let i = 0; i < 20; i += 1) {
+    const x = baseX + (Math.random() - 0.5) * 40;
+    const y = baseY + (Math.random() - 0.5) * 40;
+    if (!collidesWithObstacle(x, y, radius)) return { x, y };
+  }
+  return { x: fallbackX, y: fallbackY };
+}
+
 function spawnEnemies() {
   const { hpMul, speedMul, mobCount } = floorScale();
   const mobs = [];
   for (let i = 0; i < mobCount; i += 1) {
     const base = MOB_BASE_POSITIONS[i % MOB_BASE_POSITIONS.length];
+    const pos  = safeSpawnPos(base.x, base.y, 12, 750, 270);
     mobs.push({
       kind: "mob",
-      x: base.x + (Math.random() - 0.5) * 40,
-      y: base.y + (Math.random() - 0.5) * 40,
+      x: pos.x, y: pos.y,
       hp: Math.round(30 * hpMul),
       maxHp: Math.round(30 * hpMul),
       radius: 12,
@@ -357,10 +367,10 @@ function spawnEnemies() {
       shootCd: Math.random() * 1.0 + 0.8,
     });
   }
+  const bossPos = safeSpawnPos(820, 270, 20, 830, 400);
   mobs.push({
     kind: "boss",
-    x: 820,
-    y: 270,
+    x: bossPos.x, y: bossPos.y,
     hp: Math.round(200 * hpMul),
     maxHp: Math.round(200 * hpMul),
     radius: 20,
@@ -599,7 +609,7 @@ function updatePlayer(dt) {
 
 function allyConfig() {
   if (state.ally.stance === "assault") {
-    return { attackRange: 110, kiteRange: 55, interval: 0.45, speedMul: 1.2, damage: 13, strafeAmp: 0.3 };
+    return { attackRange: 110, kiteRange: 65, interval: 0.45, speedMul: 1.2, damage: 13, strafeAmp: 0.3 };
   }
   // guard（默认）
   return { attackRange: 0, kiteRange: 0, interval: 0.75, speedMul: 1.0, damage: 10, strafeAmp: 0 };
