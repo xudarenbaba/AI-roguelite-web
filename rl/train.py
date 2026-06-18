@@ -66,7 +66,7 @@ DEFAULTS = {
 }
 
 
-# ── 进度回调 ──────────────────────────────────────────────────────────────────
+# ── 回调 ──────────────────────────────────────────────────────────────────────
 
 class ProgressCallback(BaseCallback):
     """每 10 万步打印一次简单的训练统计。"""
@@ -79,7 +79,6 @@ class ProgressCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_print >= self.print_freq:
             self._last_print = self.num_timesteps
-            # 从 VecMonitor 取最近 episode 统计
             ep_info = self.model.ep_info_buffer
             if ep_info:
                 rewards = [e["r"] for e in ep_info]
@@ -92,6 +91,50 @@ class ProgressCallback(BaseCallback):
                 )
             else:
                 print(f"[{self.num_timesteps:>9,}] collecting...")
+        return True
+
+
+class CurriculumCallback(BaseCallback):
+    """
+    课程学习回调：每步更新所有并行环境的 curriculum_ratio。
+
+    ratio = 当前步数 / 总步数，从 0.0 线性增长到 1.0。
+    env 内部根据 ratio 决定障碍物难度：
+      0.00~0.30 → 无障碍物
+      0.30~0.60 → 最简单布局（3块）
+      0.60~1.00 → 全部4种布局随机
+    """
+
+    def __init__(self, total_timesteps: int, update_freq: int = 1024) -> None:
+        super().__init__()
+        self.total_timesteps = total_timesteps
+        self.update_freq     = update_freq
+        self._last_update    = 0
+        self._last_stage     = -1
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_update < self.update_freq:
+            return True
+        self._last_update = self.num_timesteps
+
+        ratio = min(1.0, self.num_timesteps / max(1, self.total_timesteps))
+
+        # 打印阶段切换提示
+        stage = 0 if ratio < 0.30 else (1 if ratio < 0.60 else 2)
+        if stage != self._last_stage:
+            stage_names = ["阶段1:无障碍", "阶段2:简单布局", "阶段3:全部布局"]
+            print(f"\n[Curriculum] {stage_names[stage]}  ratio={ratio:.2f}\n")
+            self._last_stage = stage
+
+        # 更新所有并行环境
+        envs = self.training_env.envs if hasattr(self.training_env, "envs") else []
+        for env in envs:
+            # 兼容 VecEnv 包装层，找到底层 AssaultEnv
+            inner = env
+            while hasattr(inner, "env"):
+                inner = inner.env
+            if hasattr(inner, "set_curriculum_ratio"):
+                inner.set_curriculum_ratio(ratio)
         return True
 
 
@@ -146,6 +189,7 @@ def main() -> None:
     # ── 回调 ─────────────────────────────────────────────────────────────────
     callbacks = [
         ProgressCallback(print_freq=100_000),
+        CurriculumCallback(total_timesteps=args.timesteps, update_freq=1024),
         CheckpointCallback(
             save_freq=max(args.checkpoint_freq // args.n_envs, 1),
             save_path=str(ckpt_dir),

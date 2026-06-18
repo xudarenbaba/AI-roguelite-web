@@ -311,7 +311,14 @@ class AssaultEnv(gym.Env):
         self._prev_action: int = 0
         self._prev_dist_to_target: float = 0.0
         self._prev_ally_pos: tuple[float, float] = (0.0, 0.0)
-        self._still_frames: int = 0        # 连续静止帧计数（方案四）
+        self._still_frames: int = 0
+        self._prev_los: bool = False
+        self._scraping_frames: int = 0     # 连续蹭墙帧计数
+        self._curriculum_ratio: float = 0.0  # 0.0~1.0，由 train.py callback 更新
+
+    def set_curriculum_ratio(self, ratio: float) -> None:
+        """由训练 callback 调用，更新课程学习进度（0.0 = 起点，1.0 = 终点）。"""
+        self._curriculum_ratio = max(0.0, min(1.0, ratio))
 
     # ── 公开接口 ──────────────────────────────────────────────────────────────
 
@@ -326,7 +333,7 @@ class AssaultEnv(gym.Env):
         self._speed_mul = 1.0 + f * 0.06
         mob_count = min(3 + int(f * 1.2), 10)
 
-        self._obstacles = OBSTACLE_LAYOUTS[(floor - 1) % len(OBSTACLE_LAYOUTS)]
+        self._obstacles = self._curriculum_obstacles()
 
         self._ally = Entity(
             x=random.uniform(160, 240),
@@ -367,10 +374,16 @@ class AssaultEnv(gym.Env):
         self._step_count    = 0
         self._prev_action   = 0
         self._still_frames  = 0
+        self._scraping_frames = 0
         self._prev_ally_pos = (self._ally.x, self._ally.y)
 
         target = self._nearest_enemy()
         self._prev_dist_to_target = self._ally.dist(target) if target else 0.0
+        self._prev_los = (
+            _has_line_of_sight(
+                self._ally.x, self._ally.y, target.x, target.y, self._obstacles
+            ) if target else False
+        )
 
         return self._get_obs(), {}
 
@@ -438,9 +451,18 @@ class AssaultEnv(gym.Env):
         dist_now   = self._ally.dist(target_now) if target_now else dist_before
         dist_delta = dist_before - dist_now   # >0 表示靠近，<0 表示远离
 
-        # 8. 奖励
+        # 8. 计算本帧 LOS 状态，检测是否刚刚绕路成功（上帧遮挡→本帧通畅）
+        los_now = (
+            _has_line_of_sight(
+                self._ally.x, self._ally.y,
+                target_now.x, target_now.y,
+                self._obstacles,
+            ) if target_now else False
+        )
+        los_improved = (not self._prev_los) and los_now   # 刚从遮挡变为通畅
+
+        # 9. 奖励
         hp_lost = max(0.0, ally_hp_before - self._ally.hp)
-        # 计算当前最危险子弹 TTA（用于奖励函数和 obs 段9）
         ally_ref = self._ally
         min_bullet_tta = (
             min((_bullet_time_to_ally(b, ally_ref) for b in self._enemy_bullets), default=1.0)
@@ -449,17 +471,33 @@ class AssaultEnv(gym.Env):
         reward = self._compute_reward(
             damage_dealt, hp_lost, target_now,
             action, dist_now, dist_delta, fired_without_los,
-            self._still_frames, min_bullet_tta,
+            self._still_frames, min_bullet_tta, los_improved,
+            self._scraping_frames,
         )
 
-        # 9. 更新帧间状态
-        # 静止检测改为：action=0（主动选择不动）才算静止
-        # 原来用实际位移 < 0.5px 判定，在障碍物内部被墙卡住时会误判为静止，
-        # 导致 agent 觉得"在障碍物区域=到处都是惩罚"，强化了边缘行为偏好
+        # 10. 更新帧间状态
         if action == 0:
             self._still_frames += 1
         else:
             self._still_frames = 0
+
+        # 蹭墙检测：选了非静止动作，但实际移动方向与期望方向严重偏差
+        # 说明被墙卡住、在做分量滑动（蹭墙）
+        actual_dx = self._ally.x - self._prev_ally_pos[0]
+        actual_dy = self._ally.y - self._prev_ally_pos[1]
+        actual_len = math.hypot(actual_dx, actual_dy)
+        if action != 0 and actual_len > 1e-4:
+            expected_dx, expected_dy = ACTION_VECTORS[action]
+            # 实际移动方向与期望方向的点积
+            dot_scrape = actual_dx / actual_len * expected_dx + actual_dy / actual_len * expected_dy
+            if dot_scrape < 0.3:   # 方向偏差超过 ~72°，认为在蹭墙
+                self._scraping_frames += 1
+            else:
+                self._scraping_frames = 0
+        else:
+            self._scraping_frames = 0
+
+        self._prev_los            = los_now
         self._prev_ally_pos       = (self._ally.x, self._ally.y)
         self._prev_action         = action
         self._prev_dist_to_target = dist_now
@@ -638,24 +676,27 @@ class AssaultEnv(gym.Env):
         fired_without_los: bool,
         still_frames: int,
         min_bullet_tta: float,
+        los_improved: bool,
+        scraping_frames: int,
     ) -> float:
         """
-        v6 奖励函数：
+        v8 奖励函数：
 
         1.  伤害奖励
-        2.  受伤惩罚（加倍：0.12→0.24）
-        3.  势能场（dist>150px 才生效）
-        4.  距离+LOS 联合区间奖励
-            - 在最优攻击位（射程内LOS通畅）时豁免静止惩罚
-        5.  移动方向奖励
-        6.  子弹危险时主动移动奖励（TTA<0.2 且 action!=0）
-        7.  动作平滑惩罚（阈值收紧到 -0.7）
-        8.  LOS 遮挡开火惩罚
-        9.  连续静止惩罚（在最优攻击位时豁免）
-        10. 角落惩罚（到任意墙 < 60px 时持续惩罚）
-        11. 死亡惩罚
-        12. 胜利奖励
-        13. 时间惩罚
+        2.  受伤惩罚
+        3.  势能场（dist>150px 强信号，dist≤150px 弱信号 0.005，不再关闭）
+        4.  距离+LOS 联合区间奖励（LOS 遮挡惩罚低，绕路容忍度高）
+        5.  绕路成功奖励
+        6.  移动方向奖励
+        7.  子弹危险时主动移动奖励
+        8.  动作平滑惩罚
+        9.  LOS 遮挡开火惩罚
+        10. 连续静止惩罚（最优攻击位时豁免）
+        11. 蹭墙惩罚（连续 10 帧方向偏差 > 72° 时开始扣分）
+        12. 角落惩罚
+        13. 死亡惩罚
+        14. 胜利奖励
+        15. 时间惩罚
         """
         DIAG       = math.hypot(CANVAS_W, CANVAS_H)
         WALL_SAFE  = 60.0   # 距离墙壁安全距离阈值
@@ -669,15 +710,22 @@ class AssaultEnv(gym.Env):
         # mob 子弹 5 伤 → -1.20；boss 子弹 9 伤 → -2.16
         reward -= hp_lost * 0.24
 
-        # 3. 势能场（只在 dist > 150px 时生效，短距离绕路不受干扰）
-        if target is not None and dist_now > 150.0:
+        # 3. 势能场（分段，近距离改为弱信号而非关闭）
+        # dist > 200px：强信号，迫使远距离主动接近
+        # 150px < dist ≤ 200px：中等信号
+        # dist ≤ 150px：弱信号（原来关闭），保持近距离绕路时有微弱靠近驱动
+        if target is not None:
             if dist_now > 200.0:
                 reward -= (dist_now / DIAG) * 0.025
-            else:
+            elif dist_now > 150.0:
                 reward -= (dist_now / DIAG) * 0.015
+            else:
+                reward -= (dist_now / DIAG) * 0.005
 
         # 4. 距离 + LOS 联合区间奖励
-        in_optimal_pos = False   # 标记是否处于最优攻击位（用于豁免静止惩罚）
+        # LOS 遮挡帧惩罚大幅降低（-0.015→-0.006，-0.005→-0.002），
+        # 让 agent 在绕路过程中不会因为短暂 LOS 遮挡而付出过高代价
+        in_optimal_pos = False
         if target is not None:
             los = _has_line_of_sight(
                 ally.x, ally.y, target.x, target.y, self._obstacles
@@ -687,19 +735,24 @@ class AssaultEnv(gym.Env):
             elif ASSAULT_KITE_RANGE <= dist_now < ASSAULT_ATTACK_RANGE:
                 if los:
                     reward += 0.010
-                    in_optimal_pos = True   # 射程内 LOS 通畅 = 最优位置
+                    in_optimal_pos = True
                 else:
-                    reward -= 0.015
+                    reward -= 0.006   # 降低：原 -0.015，绕路期间遮挡代价更低
             elif ASSAULT_ATTACK_RANGE <= dist_now < 120.0:
                 if los:
                     reward += 0.003
                 else:
-                    reward -= 0.005
+                    reward -= 0.002   # 降低：原 -0.005
             else:
                 excess = (dist_now - 120.0) / CANVAS_W
                 reward -= 0.008 + excess * 0.04
 
-        # 5. 移动方向奖励
+        # 5. 绕路成功奖励：LOS 从遮挡变为通畅时给一次性正奖励
+        # 直接奖励"成功绕过障碍物"这个具体事件，强化绕路行为
+        if los_improved:
+            reward += 0.05
+
+        # 6. 移动方向奖励
         if target is not None and action != 0:
             move_dx, move_dy = ACTION_VECTORS[action]
             to_dx = target.x - ally.x
@@ -709,31 +762,34 @@ class AssaultEnv(gym.Env):
             if move_dot > 0.5:
                 reward += 0.002
 
-        # 6. 子弹危险时主动移动奖励
-        # TTA < 0.2（约 0.44 秒内命中）且 agent 选择移动，给正奖励鼓励主动躲避
+        # 7. 子弹危险时主动移动奖励
         if min_bullet_tta < 0.2 and action != 0:
             reward += 0.003
 
-        # 7. 动作平滑惩罚（阈值收紧：-0.5→-0.7）
-        # 只惩罚几乎完全反向（>135°）的急转，允许相邻方向的自然切换
+        # 8. 动作平滑惩罚（阈值收紧到 -0.7）
         prev_vec = ACTION_VECTORS[self._prev_action]
         curr_vec = ACTION_VECTORS[action]
         dot = prev_vec[0] * curr_vec[0] + prev_vec[1] * curr_vec[1]
         if action != 0 and self._prev_action != 0 and dot < -0.7:
             reward -= 0.005
 
-        # 8. LOS 遮挡开火惩罚
+        # 9. LOS 遮挡开火惩罚
         if fired_without_los:
             reward -= 0.04
 
-        # 9. 连续静止惩罚（在最优攻击位时豁免，静止输出是合理的）
+        # 10. 连续静止惩罚（在最优攻击位时豁免）
         if still_frames > 45 and not in_optimal_pos:
             overage = min(still_frames - 45, 75)
             penalty = 0.008 + overage * (0.012 / 75)
             reward -= penalty
 
-        # 10. 角落惩罚
-        # 到任意一面墙的距离 < WALL_SAFE 时持续惩罚，越贴墙惩罚越重
+        # 11. 蹭墙惩罚：连续 10 帧方向偏差 > 72° 时开始扣分
+        # 说明 agent 在反复用某个方向撞障碍物做分量滑动，而不是绕过去
+        if scraping_frames > 10:
+            overage = min(scraping_frames - 10, 50)
+            reward -= 0.004 + overage * (0.004 / 50)  # 最高 -0.008/帧
+
+        # 12. 角落惩罚
         wall_dists = [
             ally.y,
             CANVAS_H - ally.y,
@@ -742,24 +798,42 @@ class AssaultEnv(gym.Env):
         ]
         min_wall = min(wall_dists)
         if min_wall < WALL_SAFE:
-            # 线性加重：0px 时 -0.012，60px 时 0
             wall_penalty = (1.0 - min_wall / WALL_SAFE) * 0.012
             reward -= wall_penalty
 
-        # 11. 死亡惩罚
+        # 13. 死亡惩罚
         if ally.hp <= 0:
             reward -= 30.0
 
-        # 12. 胜利奖励
+        # 14. 胜利奖励
         if len(self._enemies) == 0:
             reward += 50.0
 
-        # 13. 时间惩罚
-        reward -= 0.001
+        # 15. 时间惩罚（加强：-0.001→-0.003，给 agent 更强的紧迫感）
+        reward -= 0.003
 
         return float(reward)
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────────
+
+    def _curriculum_obstacles(self) -> list[dict]:
+        """
+        根据训练进度返回对应难度的障碍物布局。
+
+        课程学习三阶段：
+          阶段1（ratio 0.00~0.30）：无障碍物，agent 先学会"找到敌人并攻击"
+          阶段2（ratio 0.30~0.60）：只用最简单的布局0（3块），学会基础绕路
+          阶段3（ratio 0.60~1.00）：全部 4 种布局随机，学会复杂地形
+
+        ratio 由 train.py 的 CurriculumCallback 实时更新。
+        """
+        r = self._curriculum_ratio
+        if r < 0.30:
+            return []   # 阶段1：无障碍物
+        if r < 0.60:
+            return OBSTACLE_LAYOUTS[0]   # 阶段2：最简单布局
+        # 阶段3：全部布局随机
+        return OBSTACLE_LAYOUTS[random.randint(0, len(OBSTACLE_LAYOUTS) - 1)]
 
     def _safe_spawn(self, base_x: float, base_y: float,
                     radius: float,
@@ -782,8 +856,10 @@ class AssaultEnv(gym.Env):
     def _nearest_enemy(self) -> Enemy | None:
         """
         LOS 加权评分选取目标。
-        评分 = 直线距离 × LOS惩罚系数（LOS通畅=1.0，遮挡=1.8）
-        优先选有视线且近的敌人，避免一味追障碍物后面的目标。
+        评分 = 直线距离 × LOS惩罚系数（LOS通畅=1.0，遮挡=1.3）
+        系数从 1.8 降到 1.3：轻度偏好有 LOS 的目标，
+        但不过度放大遮挡目标的"有效距离"，避免 agent 因为全部目标都被遮挡时
+        不知道该往哪走、倾向于在原地等待。
         """
         if not self._enemies:
             return None
@@ -793,7 +869,7 @@ class AssaultEnv(gym.Env):
         for e in self._enemies:
             dist = ally.dist(e)
             los = _has_line_of_sight(ally.x, ally.y, e.x, e.y, self._obstacles)
-            score = dist * (1.0 if los else 1.8)
+            score = dist * (1.0 if los else 1.3)
             if score < best_score:
                 best_score = score
                 best = e
