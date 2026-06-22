@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
 import numpy as np
-from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CheckpointCallback,
@@ -44,25 +44,27 @@ from rl.env import AssaultEnv
 
 # ── 超参数 ────────────────────────────────────────────────────────────────────
 
+# RecurrentPPO（LSTM）超参数。LSTM 适合较小的 batch、较短的 n_steps。
 DEFAULTS = {
-    "timesteps":    2_000_000,
-    "n_envs":       8,           # 并行环境数（CPU 核心数 <= 8 时可直接用）
-    "n_steps":      2048,        # 每个 env 每次 rollout 的步数
-    "batch_size":   512,         # minibatch 大小
-    "n_epochs":     10,          # 每次 rollout 的训练 epoch 数
+    "timesteps":    20_000_000,
+    "n_envs":       8,           # 并行环境数
+    "n_steps":      512,         # 每个 env 每次 rollout 的步数（LSTM 用短一点）
+    "batch_size":   256,         # minibatch 大小（需能整除 n_envs*n_steps）
+    "n_epochs":     10,
     "lr":           3e-4,
-    "gamma":        0.995,       # 折扣因子（战斗场景回合长，需要高一点）
+    "gamma":        0.995,
     "gae_lambda":   0.95,
     "clip_range":   0.2,
-    "ent_coef":     0.01,        # 熵系数，鼓励探索
+    "ent_coef":     0.01,
     "vf_coef":      0.5,
     "max_grad_norm":0.5,
-    "net_arch":     [256, 256],  # policy + value 共享层
-    "run_name":     "assault_v1",
-    "checkpoint_freq": 200_000,  # 每隔多少步保存一次检查点
-    "eval_freq":    50_000,      # 每隔多少步评估一次
-    "eval_episodes":20,          # 评估时跑多少个 episode
-    "resume":       None,        # 恢复训练的检查点路径
+    "net_arch":     [256, 256],  # LSTM 之后的 MLP 头
+    "lstm_hidden":  128,         # LSTM 隐藏单元数
+    "run_name":     "assault_lstm_v1",
+    "checkpoint_freq": 500_000,
+    "eval_freq":    100_000,
+    "eval_episodes":20,
+    "resume":       None,
 }
 
 
@@ -96,14 +98,27 @@ class ProgressCallback(BaseCallback):
 
 class CurriculumCallback(BaseCallback):
     """
-    课程学习回调：每步更新所有并行环境的 curriculum_ratio。
+    课程学习回调：每隔 update_freq 步更新所有并行环境的 curriculum_ratio。
 
     ratio = 当前步数 / 总步数，从 0.0 线性增长到 1.0。
-    env 内部根据 ratio 决定障碍物难度：
-      0.00~0.30 → 无障碍物
-      0.30~0.60 → 最简单布局（3块）
-      0.60~1.00 → 全部4种布局随机
+    env 内部根据 ratio 决定 5 阶段难度（见 AssaultEnv._curriculum_stage）：
+      0.00~0.20 阶段0 无障碍 + 敌人近
+      0.20~0.40 阶段1 单块障碍 + 敌人中距
+      0.40~0.60 阶段2 简单布局 + 全图敌人
+      0.60~0.80 阶段3 中等布局
+      0.80~1.00 阶段4 全部布局
+
+    用 VecEnv.env_method 跨进程调用，兼容 SubprocVecEnv（关键：
+    SubprocVecEnv 没有 .envs 属性，直接访问会静默失效）。
     """
+
+    _STAGE_NAMES = [
+        "阶段0:无障碍·敌人近",
+        "阶段1:单块障碍·中距",
+        "阶段2:简单布局·全图",
+        "阶段3:中等布局",
+        "阶段4:全部布局",
+    ]
 
     def __init__(self, total_timesteps: int, update_freq: int = 1024) -> None:
         super().__init__()
@@ -112,6 +127,18 @@ class CurriculumCallback(BaseCallback):
         self._last_update    = 0
         self._last_stage     = -1
 
+    @staticmethod
+    def _stage_of(ratio: float) -> int:
+        if ratio < 0.20:
+            return 0
+        if ratio < 0.40:
+            return 1
+        if ratio < 0.60:
+            return 2
+        if ratio < 0.80:
+            return 3
+        return 4
+
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_update < self.update_freq:
             return True
@@ -119,22 +146,22 @@ class CurriculumCallback(BaseCallback):
 
         ratio = min(1.0, self.num_timesteps / max(1, self.total_timesteps))
 
-        # 打印阶段切换提示
-        stage = 0 if ratio < 0.30 else (1 if ratio < 0.60 else 2)
+        stage = self._stage_of(ratio)
         if stage != self._last_stage:
-            stage_names = ["阶段1:无障碍", "阶段2:简单布局", "阶段3:全部布局"]
-            print(f"\n[Curriculum] {stage_names[stage]}  ratio={ratio:.2f}\n")
+            print(f"\n[Curriculum] {self._STAGE_NAMES[stage]}  ratio={ratio:.2f}\n")
             self._last_stage = stage
 
-        # 更新所有并行环境
-        envs = self.training_env.envs if hasattr(self.training_env, "envs") else []
-        for env in envs:
-            # 兼容 VecEnv 包装层，找到底层 AssaultEnv
-            inner = env
-            while hasattr(inner, "env"):
-                inner = inner.env
-            if hasattr(inner, "set_curriculum_ratio"):
-                inner.set_curriculum_ratio(ratio)
+        # 用 env_method 跨进程调用，兼容 Subproc/Dummy VecEnv
+        try:
+            self.training_env.env_method("set_curriculum_ratio", ratio)
+        except Exception:  # noqa: BLE001
+            # 兜底：DummyVecEnv 直接访问
+            for env in getattr(self.training_env, "envs", []):
+                inner = env
+                while hasattr(inner, "env"):
+                    inner = inner.env
+                if hasattr(inner, "set_curriculum_ratio"):
+                    inner.set_curriculum_ratio(ratio)
         return True
 
 
@@ -210,12 +237,11 @@ def main() -> None:
     # ── 模型创建或恢复 ───────────────────────────────────────────────────────
     if args.resume:
         print(f"Resuming from {args.resume}")
-        model = PPO.load(
+        model = RecurrentPPO.load(
             args.resume,
             env=train_env,
             device="auto",
         )
-        # 恢复时更新 total_timesteps
         remaining = args.timesteps - model.num_timesteps
         if remaining <= 0:
             print(f"Already trained {model.num_timesteps} steps, nothing to do.")
@@ -223,8 +249,8 @@ def main() -> None:
         print(f"Remaining steps: {remaining:,}")
         total_ts = args.timesteps
     else:
-        model = PPO(
-            policy="MlpPolicy",
+        model = RecurrentPPO(
+            policy="MlpLstmPolicy",
             env=train_env,
             learning_rate=args.lr,
             n_steps=args.n_steps,
@@ -236,14 +262,19 @@ def main() -> None:
             ent_coef=args.ent_coef,
             vf_coef=DEFAULTS["vf_coef"],
             max_grad_norm=DEFAULTS["max_grad_norm"],
-            policy_kwargs=dict(net_arch=DEFAULTS["net_arch"]),
+            policy_kwargs=dict(
+                net_arch=DEFAULTS["net_arch"],
+                lstm_hidden_size=DEFAULTS["lstm_hidden"],
+                enable_critic_lstm=True,
+            ),
             tensorboard_log=str(log_dir),
             verbose=0,
             device="auto",
         )
         total_ts = args.timesteps
 
-    print(f"\nPolicy network architecture: {DEFAULTS['net_arch']}")
+    print(f"\nAlgorithm: RecurrentPPO (LSTM hidden={DEFAULTS['lstm_hidden']})")
+    print(f"Policy MLP head: {DEFAULTS['net_arch']}")
     print(f"Observation dim: {AssaultEnv().observation_space.shape[0]}")
     print(f"Action space: {AssaultEnv().action_space.n} discrete actions")
     print(f"Training for {total_ts:,} steps with {args.n_envs} envs\n")

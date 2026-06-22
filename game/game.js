@@ -20,31 +20,59 @@ const _RL_ACTION_VECTORS = [
   [-0.7071, -0.7071],    // 8 左上
 ];
 
-// 与 rl/env.py 常量对齐（v2，OBS_DIM=121）
+// 与 rl/env.py 常量对齐（v9：射线检测 + LSTM，OBS_DIM=112）
 const _RL_CANVAS_W        = 900.0;
 const _RL_CANVAS_H        = 540.0;
 const _RL_DIAG            = Math.hypot(_RL_CANVAS_W, _RL_CANVAS_H);  // ~1051
 const _RL_MAX_ENEMIES     = 5;
 const _RL_MAX_BULLETS     = 8;
-const _RL_MAX_OBSTACLES   = 7;  // 新布局最多 7 个障碍物
 const _RL_MAX_BULLET_DIST = 200.0;
 const _RL_ASSAULT_INTERVAL = 0.45;
 const _RL_N_ACTIONS       = 9;
+
+// 射线检测（与 env.py N_RAYS / RAY_MAX_DIST / RAY_STEPS 严格对齐）
+const _RL_N_RAYS       = 16;
+const _RL_RAY_MAX_DIST = 260.0;
+const _RL_RAY_STEPS    = 26;
+// 16 方向单位向量（每 22.5°）
+const _RL_RAY_DIRS = [];
+for (let i = 0; i < _RL_N_RAYS; i++) {
+  const a = 2 * Math.PI * i / _RL_N_RAYS;
+  _RL_RAY_DIRS.push([Math.cos(a), Math.sin(a)]);
+}
+
 // 段长与 env.py 严格对齐
-const _RL_SEG1 = 4;   // 只保留 x, y, 攻击冷却, 敌人数量；去掉 hp 和障碍物距离
+const _RL_SEG1 = 4;
 const _RL_SEG2 = 8;
 const _RL_SEG3 = (_RL_MAX_ENEMIES - 1) * 5;   // 20
 const _RL_SEG4 = _RL_MAX_BULLETS * 6;          // 48
-const _RL_SEG5 = _RL_MAX_OBSTACLES * 6;        // 42
+const _RL_SEG5 = _RL_N_RAYS;                   // 16（射线检测）
 const _RL_SEG6 = 4;
 const _RL_SEG7 = _RL_N_ACTIONS;               // 9
 const _RL_SEG8 = 1;
-const _RL_SEG9 = 1;   // 最危险子弹 TTA
-const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8 + _RL_SEG9; // 137
+const _RL_SEG9 = 1;                            // 最危险子弹 TTA
+const _RL_SEG10 = 1;                           // 历史最小距离
+const _RL_OBS_DIM = _RL_SEG1 + _RL_SEG2 + _RL_SEG3 + _RL_SEG4 + _RL_SEG5 + _RL_SEG6 + _RL_SEG7 + _RL_SEG8 + _RL_SEG9 + _RL_SEG10; // 112
 
-// 帧间状态：上帧动作（用于 one-hot 和平滑惩罚参考）、上帧到目标距离
+// LSTM hidden state 维度（与训练模型对齐，导出后从 meta json 也可读取）
+const _RL_LSTM_HIDDEN = 128;
+const _RL_LSTM_LAYERS = 1;
+
+// 帧间状态
 let _rlPrevAction = 0;
 let _rlPrevDistToTarget = 0.0;
+let _rlMinDistSoFar = Infinity;   // episode 内到目标的历史最近距离
+// LSTM hidden state（Float32Array，形状 [layers, 1, hidden]）
+let _rlHidden = null;   // h state
+let _rlCell   = null;   // c state
+
+function _rlResetLstmState() {
+  const size = _RL_LSTM_LAYERS * 1 * _RL_LSTM_HIDDEN;
+  _rlHidden = new Float32Array(size);   // 全零
+  _rlCell   = new Float32Array(size);
+  _rlMinDistSoFar = Infinity;
+  _rlPrevAction = 0;
+}
 
 // 状态：null = 未加载，"loading" = 加载中，InferenceSession = 就绪，"error" = 失败
 let _rlSession = null;
@@ -62,8 +90,9 @@ async function _rlLoadModel() {
       executionProviders: ["wasm"],
       graphOptimizationLevel: "all",
     });
+    _rlResetLstmState();   // 初始化 LSTM hidden state 为全零
     _rlLoadState = "ready";
-    console.log("[RL] assault_policy.onnx loaded, RL mode active.");
+    console.log("[RL] assault_policy.onnx (LSTM) loaded, RL mode active.");
   } catch (e) {
     _rlLoadState = "error";
     console.error("[RL] Failed to load model:", e);
@@ -94,6 +123,26 @@ function _rlBulletTTA(b, ally) {
   if (proj <= 0) return 1.0;
   const tta = proj / spd;
   return Math.min(1.0, Math.max(0.0, tta / 2.2));  // 2.2 = BULLET_TTL
+}
+
+// 射线检测：从 (ox,oy) 沿 (dx,dy) 步进，返回到障碍物/边界的归一化距离
+// 与 env.py _raycast_obstacle 严格对齐
+function _rlRaycast(ox, oy, dx, dy) {
+  const stepLen = _RL_RAY_MAX_DIST / _RL_RAY_STEPS;
+  for (let i = 1; i <= _RL_RAY_STEPS; i++) {
+    const d  = i * stepLen;
+    const px = ox + dx * d;
+    const py = oy + dy * d;
+    if (px < 0 || px > _RL_CANVAS_W || py < 0 || py > _RL_CANVAS_H) {
+      return Math.min(1.0, d / _RL_RAY_MAX_DIST);
+    }
+    for (const o of state.obstacles) {
+      if (px >= o.x && px <= o.x + o.w && py >= o.y && py <= o.y + o.h) {
+        return d / _RL_RAY_MAX_DIST;
+      }
+    }
+  }
+  return 1.0;
 }
 
 // 构建 121 维观测向量，与 rl/env.py _get_obs() 严格对齐（v2）
@@ -168,28 +217,10 @@ function _rlBuildObs(attackCd) {
   }
   idx += (_RL_MAX_BULLETS - threatBullets.length) * 6;
 
-  // ── 段5：障碍物 (6维/块，pad 到 4) ─────────────────────────────────────
-  const sortedObs = [...state.obstacles]
-    .map(o => ({ o, d: Math.hypot((o.x + o.w / 2) - ally.x, (o.y + o.h / 2) - ally.y) }))
-    .sort((a, b) => a.d - b.d)
-    .slice(0, _RL_MAX_OBSTACLES);
-  for (const { o } of sortedObs) {
-    const cx = o.x + o.w / 2;
-    const cy = o.y + o.h / 2;
-    const dx = cx - ally.x;
-    const dy = cy - ally.y;
-    const nearX    = Math.max(o.x, Math.min(ally.x, o.x + o.w));
-    const nearY    = Math.max(o.y, Math.min(ally.y, o.y + o.h));
-    const nearDist = Math.hypot(ally.x - nearX, ally.y - nearY);
-    const cdx      = Math.hypot(dx, dy) > 0 ? dx / Math.hypot(dx, dy) : 0;
-    obs[idx++] = dx / _RL_CANVAS_W;
-    obs[idx++] = dy / _RL_CANVAS_H;
-    obs[idx++] = o.w / _RL_CANVAS_W;
-    obs[idx++] = o.h / _RL_CANVAS_H;
-    obs[idx++] = nearDist / _RL_DIAG;
-    obs[idx++] = cdx;
+  // ── 段5：射线检测（16 方向，替换矩形障碍物 obs）─────────────────────────
+  for (const [rdx, rdy] of _RL_RAY_DIRS) {
+    obs[idx++] = _rlRaycast(ally.x, ally.y, rdx, rdy);
   }
-  idx += (_RL_MAX_OBSTACLES - sortedObs.length) * 6;
 
   // ── 段6：到四壁距离 (4维) ────────────────────────────────────────────────
   obs[idx++] = ally.y / _RL_CANVAS_H;
@@ -216,6 +247,15 @@ function _rlBuildObs(attackCd) {
     }
   }
   obs[idx++] = minTTA;
+
+  // ── 段10：历史最小距离 (1维) ─────────────────────────────────────────────
+  // 与 env.py 对齐：先更新历史最近距离，再写入 obs
+  if (target) {
+    if (distNow < _rlMinDistSoFar) _rlMinDistSoFar = distNow;
+    obs[idx++] = Math.min(1.0, _rlMinDistSoFar / _RL_DIAG);
+  } else {
+    obs[idx++] = 1.0;
+  }
 
   return obs;
 }
@@ -257,6 +297,7 @@ let _rlInferring  = false;
 
 function _rlInferAsync(attackCd) {
   if (_rlLoadState !== "ready" || _rlInferring) return;
+  if (!_rlHidden || !_rlCell) _rlResetLstmState();
   _rlInferring = true;
 
   // 更新帧间距离（供下帧 obs 段8 使用）
@@ -266,18 +307,30 @@ function _rlInferAsync(attackCd) {
     ? Math.hypot(target.x - ally.x, target.y - ally.y)
     : _rlPrevDistToTarget;
 
-  const obs    = _rlBuildObs(attackCd);
-  const tensor = new ort.Tensor("float32", obs, [1, _RL_OBS_DIM]);
-  _rlSession.run({ obs: tensor }).then(output => {
+  const obs = _rlBuildObs(attackCd);
+  // LSTM 输入：obs[1,D]、h_in/c_in[layers,1,hidden]
+  const hShape = [_RL_LSTM_LAYERS, 1, _RL_LSTM_HIDDEN];
+  const feeds = {
+    obs:  new ort.Tensor("float32", obs, [1, _RL_OBS_DIM]),
+    h_in: new ort.Tensor("float32", _rlHidden, hShape),
+    c_in: new ort.Tensor("float32", _rlCell,   hShape),
+  };
+  _rlSession.run(feeds).then(output => {
     const logits = output.logits.data;  // Float32Array[9]
     let best = 0;
     for (let i = 1; i < logits.length; i++) {
       if (logits[i] > logits[best]) best = i;
     }
-    _rlLastAction  = best;
-    _rlPrevAction  = best;   // 更新上帧动作，供下帧 one-hot 使用
-    _rlInferring   = false;
-  }).catch(() => { _rlInferring = false; });
+    _rlLastAction = best;
+    _rlPrevAction = best;
+    // 递推 LSTM hidden state：本帧输出作为下帧输入（关键）
+    _rlHidden = output.h_out.data;
+    _rlCell   = output.c_out.data;
+    _rlInferring = false;
+  }).catch((e) => {
+    console.error("[RL] inference error:", e);
+    _rlInferring = false;
+  });
 }
 
 const canvas = document.getElementById("gameCanvas");
@@ -486,6 +539,8 @@ function nextFloor() {
   state.player.hp = Math.min(state.player.maxHp, state.player.hp + 40);
   state.ally.hp   = Math.min(state.ally.maxHp,   state.ally.hp   + 40);
   state.ally.dead = false;   // 进入下一层时复活
+  // 关卡切换 = 新 episode，重置 LSTM hidden state
+  if (_rlLoadState === "ready") _rlResetLstmState();
   generateObstacles();
   spawnEnemies();
   const meta = FLOOR_META[(state.floor - 1) % FLOOR_META.length];
@@ -1080,6 +1135,8 @@ function applyStance(stance, reply) {
   if (!stance) return;
   // 客户端保底：NPC 无血时不允许切突击（正常情况由后端拦截并给出回复）
   if (stance === "assault" && state.ally.dead) return;
+  // 切到突击 = 新的决策 episode，重置 LSTM hidden state，避免上一段记忆污染
+  if (stance === "assault" && _rlLoadState === "ready") _rlResetLstmState();
   state.ally.stance = stance;
   const label  = STANCE_LABELS[stance] || stance;
   const bubble = reply || `姿态切换：${label}。`;

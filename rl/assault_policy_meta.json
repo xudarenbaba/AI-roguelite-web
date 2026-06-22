@@ -1,5 +1,5 @@
 {
-  "obs_dim": 137,
+  "obs_dim": 112,
   "n_actions": 9,
   "action_vectors": [
     [
@@ -39,7 +39,10 @@
       -0.7071067811865476
     ]
   ],
+  "lstm_hidden": 128,
+  "lstm_layers": 1,
   "model_file": "assault_policy.onnx",
   "opset": 12,
-  "description": "assault stance RL policy. Input: float32[1, obs_dim]. Output: float32[1, 9] logits. Take argmax to get action index."
+  "recurrent": true,
+  "description": "assault stance RecurrentPPO (LSTM) policy. Inputs: obs[1,obs_dim], h_in[lstm_layers,1,lstm_hidden], c_in[...]. Outputs: logits[1,n_actions], h_out, c_out. Browser must feed previous frame's h_out/c_out as next h_in/c_in; reset to zeros when episode/stance restarts."
 }
