@@ -44,13 +44,19 @@ from rl.env import AssaultEnv
 
 # ── 超参数 ────────────────────────────────────────────────────────────────────
 
-# RecurrentPPO（LSTM）超参数。LSTM 适合较小的 batch、较短的 n_steps。
+# RecurrentPPO（LSTM）超参数。
+# 默认值针对 Apple M3 Ultra（28 核）实测调优：
+#   - n_envs=24：环境采样吞吐在 24 处饱和，28 反而因上下文切换变慢
+#   - n_steps=160：LSTM 的 BPTT 是训练瓶颈，n_steps 越短训练越快
+#   - n_epochs=8 + batch=512：吞吐 ~380 steps/s，20M 步约 14-15h，
+#     同时保持足够的样本利用率（不会因 epochs 太少损失收敛质量）
+#   实测吞吐对比：8envs/512/10ep ≈ 110 steps/s（~50h）→ 当前配置 ≈ 380 steps/s（~15h）
 DEFAULTS = {
     "timesteps":    20_000_000,
-    "n_envs":       8,           # 并行环境数
-    "n_steps":      512,         # 每个 env 每次 rollout 的步数（LSTM 用短一点）
-    "batch_size":   256,         # minibatch 大小（需能整除 n_envs*n_steps）
-    "n_epochs":     10,
+    "n_envs":       24,          # 并行环境数（M3 Ultra 28 核的最优点）
+    "n_steps":      160,         # 每个 env 每次 rollout 步数（LSTM 短序列训练更快）
+    "batch_size":   640,         # minibatch（整除 n_envs*n_steps=3840，分 6 个 minibatch）
+    "n_epochs":     8,
     "lr":           3e-4,
     "gamma":        0.995,
     "gae_lambda":   0.95,
@@ -60,9 +66,9 @@ DEFAULTS = {
     "max_grad_norm":0.5,
     "net_arch":     [256, 256],  # LSTM 之后的 MLP 头
     "lstm_hidden":  128,         # LSTM 隐藏单元数
-    "run_name":     "assault_lstm_v1",
-    "checkpoint_freq": 500_000,
-    "eval_freq":    100_000,
+    "run_name":     "assault_lstm_v2",
+    "checkpoint_freq": 1_000_000,
+    "eval_freq":    200_000,
     "eval_episodes":20,
     "resume":       None,
 }
