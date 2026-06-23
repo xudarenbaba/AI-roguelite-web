@@ -774,22 +774,28 @@ class AssaultEnv(gym.Env):
         # 1. 伤害奖励
         reward += damage_dealt * 0.08
 
-        # 2. 受伤惩罚
-        reward -= hp_lost * 0.24
+        # 2. 受伤惩罚（修复：从 0.24 降回 0.12，避免绕路受伤风险压过靠近收益）
+        reward -= hp_lost * 0.12
 
-        # 3. 进度奖励（核心）：创下历史最近距离时按幅度奖励
-        # progress 是本帧突破历史最近距离的像素值（≥0）。绕路时 dist 暂时拉远，
-        # progress=0（不奖励也不惩罚），只有真正接近目标才给正奖励。
-        # 系数 0.02：靠近 50px（一次明显推进）≈ +1.0
+        # 3. 进度奖励：创下历史最近距离时按幅度奖励（奖励"真正前进"）
         reward += progress * 0.02
 
+        # 3b. 势能场（修复：恢复持续靠近压力，与进度奖励共存）
+        # 进度奖励只在"创新低"那一帧给，agent 冲到某距离后会失去动力；
+        # 势能场每帧都按当前距离施压，确保 agent 持续有"再靠近"的拉力。
+        # dist > 150px 强信号，≤150px 弱信号（近距离绕路时不过度干扰）。
+        if target is not None:
+            DIAG = math.hypot(CANVAS_W, CANVAS_H)
+            if dist_now > 150.0:
+                reward -= (dist_now / DIAG) * 0.020
+            else:
+                reward -= (dist_now / DIAG) * 0.008
+
         # 4. 非对称远离惩罚：主动远离目标时额外惩罚（远离代价 > 不动）
-        # dist_delta < 0 表示远离。绕路时偶尔远离是允许的，但持续远离要惩罚。
         if target is not None and dist_delta < 0:
             reward -= abs(dist_delta) * 0.008
 
-        # 5. LOS 全距离奖励：任何距离只要视线通畅给小正奖励，遮挡给小负奖励
-        # 驱动 agent 在地图任何位置都主动寻找有视线的角度
+        # 5. LOS 全距离奖励：任何距离视线通畅给小正奖励，遮挡给小负奖励
         in_optimal_pos = False
         if target is not None:
             los = _has_line_of_sight(
@@ -798,18 +804,22 @@ class AssaultEnv(gym.Env):
             if los:
                 reward += 0.002
             else:
-                reward -= 0.001
+                reward -= 0.002   # 修复：遮挡惩罚加倍（原 -0.001）
 
-            # 6. 距离区间奖励（射程内攻击位额外加成）
+            # 6. 距离区间奖励（射程内攻击位）
             if dist_now < ASSAULT_KITE_RANGE:
                 reward -= 0.010   # 过近
             elif ASSAULT_KITE_RANGE <= dist_now < ASSAULT_ATTACK_RANGE:
                 if los:
-                    reward += 0.012   # 最优攻击位
+                    reward += 0.020   # 修复：最优攻击位奖励提高（0.012→0.020）
                     in_optimal_pos = True
+                else:
+                    reward -= 0.015   # 修复：射程内遮挡=隔墙苟着，明确重罚（原来无惩罚）
             elif ASSAULT_ATTACK_RANGE <= dist_now < 130.0:
                 if los:
-                    reward += 0.004   # 稍远但可接受
+                    reward += 0.006   # 稍远但可接受（0.004→0.006）
+                else:
+                    reward -= 0.008   # 修复：稍远遮挡也惩罚
 
         # 7. 绕路成功奖励：LOS 从遮挡变为通畅
         if los_improved:
